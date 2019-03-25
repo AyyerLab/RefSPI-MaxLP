@@ -80,7 +80,7 @@ class DataGenerator():
             count_multi = fptr.create_dataset('count_multi', (self.num_data,), dtype=dtype)
 
             #ang = cp.random.rand(self.num_data, dtype='f8')*360
-            ang = np.random.rand(self.num_data, dtype='f8')*2.*cp.pi
+            ang = np.random.rand(self.num_data).astype('f8')*2.*cp.pi
             fptr['true_angles'] = ang
             
             rot_mask = cp.empty(self.size**2, dtype='f8')
