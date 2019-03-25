@@ -88,13 +88,13 @@ class EMC():
         view = cp.empty(self.size**2, dtype='f8')
         msum = -self.model.sum()
 
-        bsize_model = int(np.ceil(self.size/16.))
-        bsize_data = int(np.ceil(self.dset.num_data/16.))
+        bsize_model = int(np.ceil(self.size/32.))
+        bsize_data = int(np.ceil(self.dset.num_data/32.))
         for r in range(self.num_rot):
-            kernels._slice_gen((bsize_model,)*2, (16,)*2,
+            kernels._slice_gen((bsize_model,)*2, (32,)*2,
                 (self.model, r/self.num_rot*2.*np.pi,
-                 self.size, view))
-            kernels._calc_prob_all((bsize_data,), (16,),
+                 self.size, 1, view))
+            kernels._calc_prob_all((bsize_data,), (32,),
                 (view, self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
@@ -116,13 +116,13 @@ class EMC():
             if h_p_norm[r] == 0.:
                 continue
             view[:] = 0
-            kernels._merge_all((bsize_data,), (16,),
+            kernels._merge_all((bsize_data,), (32,),
                 (self.prob[r], self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                  view))
-            kernels._slice_merge((bsize_model,)*2, (16,)*2,
+            kernels._slice_merge((bsize_model,)*2, (32,)*2,
                 (view/p_norm[r], r/self.num_rot*2.*np.pi,
                  self.size, self.model, self.mweights))
             #self.model += ndimage.rotate(view.reshape((self.size,)*2)/p_norm[r], r/self.num_rot*360, reshape=False, order=1)
