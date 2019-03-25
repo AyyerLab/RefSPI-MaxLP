@@ -5,35 +5,39 @@ _slice_gen = cp.RawKernel(r'''
     void slice_gen(const double *model,
                    const double angle,
                    const long long size,
+                   const long long log_flag,
                    double *view) {
         int x = blockIdx.x * blockDim.x + threadIdx.x ;
         int y = blockIdx.y * blockDim.y + threadIdx.y ;
         if (x > size - 1 || y > size - 1)
             return ;
         int t = x*size + y ;
-        view[t] = -1000. ;
+        if (log_flag)
+            view[t] = -1000. ;
+        else
+            view[t] = 0. ;
 
         int cen = size / 2 ;
         double ac = cos(angle), as = sin(angle) ;
         double tx = (x - cen) * ac - (y - cen) * as + cen ;
         double ty = (x - cen) * as + (y - cen) * ac + cen ;
         int ix = tx, iy = ty ;
-        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2) {
-            view[t] = -1000. ;
+        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
             return ;
-        }
 
         double fx = tx - ix, fy = ty - iy ;
         double cx = 1. - fx, cy = 1. - fy ;
 
         view[t] = model[ix*size + iy]*cx*cy + 
-                           model[(ix+1)*size + iy]*fx*cy +
-                           model[ix*size + (iy+1)]*cx*fy + 
-                           model[(ix+1)*size + (iy+1)]*fx*fy ;
-        if (view[t] < 1.e-20)
-            view[t] = -1000. ;
-        else
-            view[t] = log(view[t]) ;
+                  model[(ix+1)*size + iy]*fx*cy +
+                  model[ix*size + (iy+1)]*cx*fy + 
+                  model[(ix+1)*size + (iy+1)]*fx*fy ;
+        if (log_flag) {
+            if (view[t] < 1.e-20)
+                view[t] = -1000. ;
+            else
+                view[t] = log(view[t]) ;
+        }
     }
     ''', 'slice_gen')
 
