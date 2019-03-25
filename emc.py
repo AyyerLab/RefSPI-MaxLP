@@ -14,6 +14,8 @@ import cupyx
 #cp.cuda.Device(2).use()
 P_MIN = 1.e-6
 
+import kernels
+
 class Dataset():
     def __init__(self, photons_file, num_pix):
         self.photons_file = photons_file
@@ -36,55 +38,6 @@ class Dataset():
 
             self.mean_count = (self.place_ones.shape[0] + self.count_multi.sum()) / self.num_data
         print('%d frames with %.3f photons/frame' % (self.num_data, self.mean_count))
-
-_calc_prob_all = cp.RawKernel(r'''
-    extern "C" __global__
-    void calc_prob_all(const double *lview,
-                       const long long ndata,
-                       const int *ones,
-                       const int *multi,
-                       const long long *o_acc,
-                       const long long *m_acc,
-                       const int *p_o,
-                       const int *p_m,
-                       const int *c_m,
-                       double *prob_r) {
-        long long d, t ;
-        d = blockDim.x * blockIdx.x + threadIdx.x ;
-        if (d >= ndata)
-            return ;
-
-        for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t)
-            prob_r[d] += lview[p_o[t]] ;
-        for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t)
-            prob_r[d] += lview[p_m[t]] * c_m[t] ;
-    }
-    ''', 'calc_prob_all')
-
-_merge_all = cp.RawKernel(r'''
-    extern "C" __global__
-    void merge_all(const double *prob_r,
-                   const long long ndata,
-                   const int *ones,
-                   const int *multi,
-                   const long long *o_acc,
-                   const long long *m_acc,
-                   const int *p_o,
-                   const int *p_m,
-                   const int *c_m,
-                   const long long npix,
-                   double *view) {
-        long long d, t ;
-        d = blockDim.x * blockIdx.x + threadIdx.x ;
-        if (d >= ndata)
-            return ;
-
-        for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t)
-            atomicAdd(&view[p_o[t]], prob_r[d]) ;
-        for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t)
-            atomicAdd(&view[p_m[t]], prob_r[d] * c_m[t]) ;
-    }
-    ''', 'merge_all')
 
 class EMC():
     def __init__(self, config_file):
@@ -132,18 +85,21 @@ class EMC():
 
     def _run_iteration_rd(self, iternum=None):
         self.prob = cp.empty((self.num_rot, self.dset.num_data), dtype='f8')
+        view = cp.empty(self.size**2, dtype='f8')
+        msum = -self.model.sum()
+
+        bsize_model = int(np.ceil(self.size/16.))
+        bsize_data = int(np.ceil(self.dset.num_data/16.))
         for r in range(self.num_rot):
-            view = ndimage.rotate(self.model, -r/self.num_rot*360., reshape=False, order=1)
-            view[view == 0] = 1.e-20
-            vsum = float(view.sum())
-            lview = cp.log(view).ravel()
-            self.prob[r][:] = -vsum
-            _calc_prob_all((16,), (int(np.ceil(self.dset.num_data/16.)),),
-                           (lview, self.dset.num_data,
-                            self.dset.ones, self.dset.multi,
-                            self.dset.ones_accum, self.dset.multi_accum,
-                            self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                            self.prob[r]))
+            kernels._slice_gen((bsize_model,)*2, (16,)*2,
+                (self.model, r/self.num_rot*2.*np.pi,
+                 self.size, view))
+            kernels._calc_prob_all((bsize_data,), (16,),
+                (view, self.dset.num_data,
+                 self.dset.ones, self.dset.multi,
+                 self.dset.ones_accum, self.dset.multi_accum,
+                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                 msum, self.prob[r]))
 
         max_exp = self.prob.max(0)
         rmax = self.prob.argmax(axis=0)
@@ -151,21 +107,26 @@ class EMC():
         self.prob /= self.prob.sum(0)
         self.prob[self.prob < P_MIN] = 0
         p_norm = self.prob.sum(1)
+        h_p_norm = p_norm.get()
 
         self.model[:] = 0
         self.mweights[:] = 0
+        uniform = cp.ones_like(self.mweights)
         for r in range(self.num_rot):
-            if p_norm[r] == 0.:
+            if h_p_norm[r] == 0.:
                 continue
             view[:] = 0
-            _merge_all((16,), (int(np.ceil(self.dset.num_data/16.)),),
-                       (self.prob[r], self.dset.num_data,
-                        self.dset.ones, self.dset.multi,
-                        self.dset.ones_accum, self.dset.multi_accum,
-                        self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                        self.dset.num_pix, view.ravel()))
-            self.model += ndimage.rotate(view/p_norm[r], r/self.num_rot*360, reshape=False, order=1)
-            self.mweights += ndimage.rotate(cp.ones_like(view), r/self.num_rot*360, reshape=False, order=1)
+            kernels._merge_all((bsize_data,), (16,),
+                (self.prob[r], self.dset.num_data,
+                 self.dset.ones, self.dset.multi,
+                 self.dset.ones_accum, self.dset.multi_accum,
+                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                 view))
+            kernels._slice_merge((bsize_model,)*2, (16,)*2,
+                (view/p_norm[r], r/self.num_rot*2.*np.pi,
+                 self.size, self.model, self.mweights))
+            #self.model += ndimage.rotate(view.reshape((self.size,)*2)/p_norm[r], r/self.num_rot*360, reshape=False, order=1)
+            #self.mweights += ndimage.rotate(uniform, r/self.num_rot*360, reshape=False, order=1)
         self.model[self.mweights > 0] /= self.mweights[self.mweights > 0]
 
         if iternum is None:
@@ -260,14 +221,14 @@ def main():
     args = parser.parse_args()
 
     recon = EMC(args.config_file)
-    print('Iter  time  change')
+    print('\nIter  time     change')
     for i in range(args.num_iter):
         m0 = cp.copy(recon.model)
         stime = time.time()
         recon.run_iteration(i+1, itype=args.itype)
         etime = time.time()
         norm = float(cp.linalg.norm(recon.model - m0))
-        print('%-6d%-6.2f%e' % (i+1, etime-stime, norm))
+        print('%-6d%-.2e %e' % (i+1, etime-stime, norm))
 
 if __name__ == '__main__':
     main()
