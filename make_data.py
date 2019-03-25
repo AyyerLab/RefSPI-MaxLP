@@ -2,6 +2,7 @@
 
 import sys
 import os
+import time
 import argparse
 import configparser
 
@@ -9,6 +10,8 @@ import h5py
 import numpy as np
 import cupy as cp
 from cupyx.scipy import ndimage
+
+import kernels
 
 class DataGenerator():
     def __init__(self, config_file):
@@ -21,17 +24,17 @@ class DataGenerator():
         self.out_file = os.path.join(os.path.dirname(config_file),
                                      config.get('make_data', 'out_photons_file'))
 
-        self.mask = cp.zeros((self.size, self.size), dtype='f4')
+        self.mask = cp.zeros((self.size, self.size), dtype='f8')
         self.mask_sum = 0
 
     def make_mask(self):
         num_circ = 10
         mcen = self.size // 2
-        x, y = cp.indices(self.mask.shape, dtype='f4')
+        x, y = cp.indices(self.mask.shape, dtype='f8')
         for _ in range(num_circ):
-            rad = cp.random.rand(1, dtype='f4') * self.size / 5.
+            rad = cp.random.rand(1, dtype='f8') * self.size / 5.
             while True:
-                cen = cp.random.rand(2, dtype='f4') * self.size
+                cen = cp.random.rand(2, dtype='f8') * self.size
                 dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad)
                 if dist < mcen:
                     break
@@ -76,17 +79,23 @@ class DataGenerator():
             place_multi = fptr.create_dataset('place_multi', (self.num_data,), dtype=dtype)
             count_multi = fptr.create_dataset('count_multi', (self.num_data,), dtype=dtype)
 
-            ang = cp.random.rand(self.num_data)*360
-            fptr['true_angles'] = ang.get()
+            #ang = cp.random.rand(self.num_data, dtype='f8')*360
+            ang = np.random.rand(self.num_data, dtype='f8')*2.*cp.pi
+            fptr['true_angles'] = ang
+            
+            rot_mask = cp.empty(self.size**2, dtype='f8')
+            bsize_model = int(np.ceil(self.size/32.))
+            stime = time.time()
             for i in range(self.num_data):
-                rot_mask = ndimage.rotate(self.mask, ang[i], reshape=False, order=1)
-                frame = cp.random.poisson(rot_mask, dtype='i4')
-                #print('\t', rot_mask.shape, rot_mask.sum(), self.mask.sum(), frame.sum())
-                place_ones[i] = cp.where(frame.ravel() == 1)[0].get()
-                place_multi[i] = cp.where(frame.ravel() > 1)[0].get()
+                kernels._slice_gen((bsize_model,)*2, (32,)*2,
+                    (self.mask.ravel(), ang[i], self.size, 0, rot_mask))
+                frame = cp.random.poisson(rot_mask, dtype='i4').ravel()
+                place_ones[i] = cp.where(frame == 1)[0].get()
+                place_multi[i] = cp.where(frame > 1)[0].get()
                 count_multi[i] = frame[frame > 1].get()
                 sys.stderr.write('\rWritten %d/%d frames (%d)' % (i+1, self.num_data, int(frame.sum())))
-            sys.stderr.write('\n')
+            etime = time.time()
+            sys.stderr.write('\nTime taken (make_data): %f s\n' % (etime-stime))
 
 def main():
     parser = argparse.ArgumentParser(description='Padman data generator')
