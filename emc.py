@@ -75,6 +75,8 @@ class EMC():
             self.model[:] = np.random.random((self.size, self.size)) * self.dset.mean_count / self.dset.num_pix
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
         self.mweights = np.zeros((self.size, self.size), dtype='f8')
+        self.bsize_model = int(np.ceil(self.size/32.))
+        self.bsize_data = int(np.ceil(self.dset.num_data/32.))
 
     def run_iteration(self, iternum=None):
         num_rot_p = self.num_rot // self.num_proc
@@ -82,24 +84,29 @@ class EMC():
             num_rot_p += 1
         self.prob = cp.empty((num_rot_p, self.dset.num_data), dtype='f8')
         view = cp.empty(self.size**2, dtype='f8')
-
-        bsize_model = int(np.ceil(self.size/32.))
-        bsize_data = int(np.ceil(self.dset.num_data/32.))
-        msum = float(-self.model.sum())
         dmodel = cp.array(self.model)
         dmweights = cp.array(self.mweights)
 
+        self._calculate_prob(dmodel, view)          # CUDA stuff
+        self._normalize_prob()                      # MPI stuff
+        self._update_model(view, dmodel, dmweights) # CUDA stuff
+        self._normalize_model(dmodel, dmweights, iternum)    # MPI stuff
+
+    def _calculate_prob(self, dmodel, view):
+        msum = float(-self.model.sum())
+
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
-            kernels.slice_gen((bsize_model,)*2, (32,)*2,
+            kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
                 (dmodel, r/self.num_rot*2.*np.pi, 1.,
                  self.size, 1, view))
-            kernels.calc_prob_all((bsize_data,), (32,),
+            kernels.calc_prob_all((self.bsize_data,), (32,),
                 (view, self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                  msum, self.prob[i]))
 
+    def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
         rmax_p = (self.prob.argmax(axis=0) * self.num_proc + self.rank).astype('i4').get()
         max_exp = np.empty_like(max_exp_p)
@@ -116,6 +123,8 @@ class EMC():
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob /= cp.array(psum)
         self.prob[self.prob < P_MIN] = 0
+
+    def _update_model(self, view, dmodel, dmweights):
         p_norm = self.prob.sum(1)
         h_p_norm = p_norm.get()
 
@@ -125,16 +134,17 @@ class EMC():
             if h_p_norm[i] == 0.:
                 continue
             view[:] = 0
-            kernels.merge_all((bsize_data,), (32,),
+            kernels.merge_all((self.bsize_data,), (32,),
                 (self.prob[i], self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                  view))
-            kernels.slice_merge((bsize_model,)*2, (32,)*2,
+            kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
                 (view/p_norm[i], r/self.num_rot*2.*np.pi,
                  self.size, dmodel, dmweights))
-        
+
+    def _normalize_model(self, dmodel, dmweights, iternum):
         self.model = dmodel.get()
         self.mweights = dmweights.get()
         if self.rank == 0:
