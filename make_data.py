@@ -20,10 +20,13 @@ class DataGenerator():
 
         self.size = config.getint('parameters', 'size')
         self.num_data = config.getint('make_data', 'num_data')
+        self.fluence = config.get('make_data', 'fluence', fallback='constant')
         self.mean_count = config.getfloat('make_data', 'mean_count')
         self.out_file = os.path.join(os.path.dirname(config_file),
                                      config.get('make_data', 'out_photons_file'))
 
+        if self.fluence not in ['constant', 'gamma']:
+            raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
         self.mask = cp.zeros((self.size, self.size), dtype='f8')
         self.mask_sum = 0
 
@@ -63,6 +66,10 @@ class DataGenerator():
                 self.make_mask()
 
         with h5py.File(self.out_file, 'a') as fptr:
+            if 'ones' in fptr:
+                del fptr['ones']
+            if 'multi' in fptr:
+                del fptr['multi']
             if 'place_ones' in fptr:
                 del fptr['place_ones']
             if 'place_multi' in fptr:
@@ -84,13 +91,19 @@ class DataGenerator():
             #ang = cp.random.rand(self.num_data, dtype='f8')*360
             ang = np.random.rand(self.num_data).astype('f8')*2.*cp.pi
             fptr['true_angles'] = ang
+            if self.fluence == 'gamma':
+                if 'scale' in fptr:
+                    del fptr['scale']
+                scale = np.random.gamma(2., 0.5, self.num_data)
+            else:
+                scale = np.ones(self.num_data, dtype='f8')
             
             rot_mask = cp.empty(self.size**2, dtype='f8')
             bsize_model = int(np.ceil(self.size/32.))
             stime = time.time()
             for i in range(self.num_data):
                 kernels._slice_gen((bsize_model,)*2, (32,)*2,
-                    (self.mask.ravel(), ang[i], self.size, 0, rot_mask))
+                    (self.mask.ravel(), ang[i], scale[i], self.size, 0, rot_mask))
                 frame = cp.random.poisson(rot_mask, dtype='i4').ravel()
                 place_ones[i] = cp.where(frame == 1)[0].get()
                 place_multi[i] = cp.where(frame > 1)[0].get()
