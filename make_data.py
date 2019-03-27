@@ -102,7 +102,7 @@ class DataGenerator():
             bsize_model = int(np.ceil(self.size/32.))
             stime = time.time()
             for i in range(self.num_data):
-                kernels._slice_gen((bsize_model,)*2, (32,)*2,
+                kernels.slice_gen((bsize_model,)*2, (32,)*2,
                     (self.mask.ravel(), ang[i], scale[i], self.size, 0, rot_mask))
                 frame = cp.random.poisson(rot_mask, dtype='i4').ravel()
                 place_ones[i] = cp.where(frame == 1)[0].get()

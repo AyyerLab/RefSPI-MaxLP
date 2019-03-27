@@ -90,10 +90,10 @@ class EMC():
         dmweights = cp.array(self.mweights)
 
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
-            kernels._slice_gen((bsize_model,)*2, (32,)*2,
+            kernels.slice_gen((bsize_model,)*2, (32,)*2,
                 (dmodel, r/self.num_rot*2.*np.pi, 1.,
                  self.size, 1, view))
-            kernels._calc_prob_all((bsize_data,), (32,),
+            kernels.calc_prob_all((bsize_data,), (32,),
                 (view, self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
@@ -125,13 +125,13 @@ class EMC():
             if h_p_norm[i] == 0.:
                 continue
             view[:] = 0
-            kernels._merge_all((bsize_data,), (32,),
+            kernels.merge_all((bsize_data,), (32,),
                 (self.prob[i], self.dset.num_data,
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                  view))
-            kernels._slice_merge((bsize_model,)*2, (32,)*2,
+            kernels.slice_merge((bsize_model,)*2, (32,)*2,
                 (view/p_norm[i], r/self.num_rot*2.*np.pi,
                  self.size, dmodel, dmweights))
         

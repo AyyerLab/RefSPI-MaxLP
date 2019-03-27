@@ -1,6 +1,6 @@
 import cupy as cp
 
-_slice_gen = cp.RawKernel(r'''
+slice_gen = cp.RawKernel(r'''
     extern "C" __global__
     void slice_gen(const double *model,
                    const double angle,
@@ -43,7 +43,7 @@ _slice_gen = cp.RawKernel(r'''
     }
     ''', 'slice_gen')
 
-_slice_merge = cp.RawKernel(r'''
+slice_merge = cp.RawKernel(r'''
     extern "C" __global__
     void slice_merge(const double *view,
                      const double angle,
@@ -80,7 +80,7 @@ _slice_merge = cp.RawKernel(r'''
     }
     ''', 'slice_merge')
 
-_calc_prob_all = cp.RawKernel(r'''
+calc_prob_all = cp.RawKernel(r'''
     extern "C" __global__
     void calc_prob_all(const double *lview,
                        const long long ndata,
@@ -106,7 +106,7 @@ _calc_prob_all = cp.RawKernel(r'''
     }
     ''', 'calc_prob_all')
 
-_merge_all = cp.RawKernel(r'''
+merge_all = cp.RawKernel(r'''
     extern "C" __global__
     void merge_all(const double *prob_r,
                    const long long ndata,
