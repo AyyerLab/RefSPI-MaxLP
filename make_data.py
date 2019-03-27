@@ -78,6 +78,8 @@ class DataGenerator():
             place_ones = fptr.create_dataset('place_ones', (self.num_data,), dtype=dtype)
             place_multi = fptr.create_dataset('place_multi', (self.num_data,), dtype=dtype)
             count_multi = fptr.create_dataset('count_multi', (self.num_data,), dtype=dtype)
+            ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
+            multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
             #ang = cp.random.rand(self.num_data, dtype='f8')*360
             ang = np.random.rand(self.num_data).astype('f8')*2.*cp.pi
@@ -93,7 +95,9 @@ class DataGenerator():
                 place_ones[i] = cp.where(frame == 1)[0].get()
                 place_multi[i] = cp.where(frame > 1)[0].get()
                 count_multi[i] = frame[frame > 1].get()
-                sys.stderr.write('\rWritten %d/%d frames (%d)' % (i+1, self.num_data, int(frame.sum())))
+                ones[i] = place_ones[i].shape[0]
+                multi[i] = place_multi[i].shape[0]
+                sys.stderr.write('\rWritten %d/%d frames (%d)  ' % (i+1, self.num_data, int(frame.sum())))
             etime = time.time()
             sys.stderr.write('\nTime taken (make_data): %f s\n' % (etime-stime))
 
