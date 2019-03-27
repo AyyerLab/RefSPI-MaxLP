@@ -91,7 +91,7 @@ class EMC():
 
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
             kernels._slice_gen((bsize_model,)*2, (32,)*2,
-                (dmodel, r/self.num_rot*2.*np.pi,
+                (dmodel, r/self.num_rot*2.*np.pi, 1.,
                  self.size, 1, view))
             kernels._calc_prob_all((bsize_data,), (32,),
                 (view, self.dset.num_data,

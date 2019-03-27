@@ -4,6 +4,7 @@ _slice_gen = cp.RawKernel(r'''
     extern "C" __global__
     void slice_gen(const double *model,
                    const double angle,
+                   const double scale,
                    const long long size,
                    const long long log_flag,
                    double *view) {
@@ -32,6 +33,7 @@ _slice_gen = cp.RawKernel(r'''
                   model[(ix+1)*size + iy]*fx*cy +
                   model[ix*size + (iy+1)]*cx*fy + 
                   model[(ix+1)*size + (iy+1)]*fx*fy ;
+        view[t] *= scale ;
         if (log_flag) {
             if (view[t] < 1.e-20)
                 view[t] = -1000. ;
