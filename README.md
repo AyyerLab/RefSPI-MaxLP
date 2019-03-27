@@ -29,6 +29,6 @@ The reconstruction program implements the EMC algorithm to determine the orienta
 These are some of the future enhancements we would like to achieve:
  * Include shot-by-shot incident fluence variations, and recover them
  * Include non-uniform background in simulated data and ability to incorporate that information
- * Scale to multiple GPUs, first on same node, but later across nodes
+ * ~~Scale to multiple GPUs, first on same node, but later across nodes~~ [DONE 1078a58]
  * Scale to large data sets and fine orientation sampling without running out of memory
  * Use CUDATextureObject API for faster rotations (needs modificatin of cupy)
