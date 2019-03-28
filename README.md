@@ -32,5 +32,5 @@ These are some of the future enhancements we would like to achieve:
  * ~~Include shot-by-shot incident fluence variations, and recover them~~ \[DONE (trivially) [6e642fe](https://github.com/kartikayyer/CuPADMAN/commit/6e642fe1854e1186882b61244b325a839b3b3b38)\]
  * Include non-uniform background in simulated data and ability to incorporate that information
  * ~~Scale to multiple GPUs, first on same node, but later across nodes~~ \[DONE [1078a58](https://github.com/kartikayyer/CuPADMAN/commit/1078a58f9ba1cdc48f816a5606c5f56c5b9ce52a)\]
- * Scale to large data sets and fine orientation sampling without running out of memory
+ * ~~Scale to large data sets and fine orientation sampling without running out of memory~~ \[DONE [7728cb9](https://github.com/kartikayyer/CuPADMAN/commit/7728cb9a9f7fb377a4ecff4bb9eb4c8a49c861f9)\]
  * Use CUDATextureObject API for faster rotations (needs modification of cupy)
