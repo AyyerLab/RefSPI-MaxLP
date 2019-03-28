@@ -9,7 +9,6 @@ import configparser
 import h5py
 import numpy as np
 import cupy as cp
-from cupyx.scipy import ndimage
 
 import kernels
 
@@ -30,10 +29,12 @@ class DataGenerator():
         self.mask = cp.zeros((self.size, self.size), dtype='f8')
         self.mask_sum = 0
 
-    def make_mask(self):
-        num_circ = 10
+    def make_mask(self, cmin=0.5):
+        num_circ = 20
         mcen = self.size // 2
         x, y = cp.indices(self.mask.shape, dtype='f8')
+        pixrad = cp.sqrt((x-mcen)**2 + (y-mcen)**2)
+        self.mask[pixrad < mcen-1] = 1.
         for _ in range(num_circ):
             rad = cp.random.rand(1, dtype='f8') * self.size / 5.
             while True:
@@ -43,7 +44,7 @@ class DataGenerator():
                     break
 
             pixrad = cp.sqrt((x - cen[0])**2 + (y - cen[1])**2)
-            self.mask[pixrad <= rad] += (rad - pixrad[pixrad <= rad])**0.4
+            self.mask[pixrad <= rad] *= cmin + (1. - cmin) * (pixrad[pixrad <= rad] / rad)**2
         self.mask *= self.mean_count / self.mask.sum()
         self.mask_sum = float(self.mask.sum())
 
