@@ -18,7 +18,7 @@ P_MIN = 1.e-6
 import kernels
 
 class Dataset():
-    def __init__(self, photons_file, num_pix):
+    def __init__(self, photons_file, num_pix, need_scaling=False):
         self.photons_file = photons_file
         self.num_pix = num_pix
 
@@ -41,9 +41,12 @@ class Dataset():
             self.multi_accum = cp.roll(self.multi.cumsum(), 1)
             self.multi_accum[0] = 0
             self.place_multi = cp.array(np.hstack(fptr['place_multi'][:]))
-            self.count_multi = cp.array(np.hstack(fptr['count_multi'][:]))
+            self.count_multi = np.hstack(fptr['count_multi'][:])
 
             self.mean_count = float((self.place_ones.shape[0] + self.count_multi.sum()) / self.num_data)
+            if need_scaling:
+                self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum() for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
+            self.count_multi = cp.array(self.count_multi)
 
 class EMC():
     def __init__(self, config_file):
@@ -63,9 +66,10 @@ class EMC():
                                           config.get('emc', 'output_folder', fallback='data/'))
         self.log_file = os.path.join(os.path.dirname(config_file),
                                      config.get('emc', 'log_file', fallback='EMC.log'))
+        self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
         stime = time.time()
-        self.dset = Dataset(self.photons_file, self.size**2)
+        self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
         etime = time.time()
         if self.rank == 0:
             print('%d frames with %.3f photons/frame (%f s)' % (self.dset.num_data, self.dset.mean_count, etime-stime))
@@ -75,6 +79,11 @@ class EMC():
             self.model[:] = np.random.random((self.size, self.size)) * self.dset.mean_count / self.dset.num_pix
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
         self.mweights = np.zeros((self.size, self.size), dtype='f8')
+        if self.need_scaling:
+            self.scales = self.dset.counts / self.dset.mean_count
+        else:
+            self.scales = cp.ones(self.dset.num_data, dtype='f8')
+
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
 
@@ -87,10 +96,10 @@ class EMC():
         dmodel = cp.array(self.model)
         dmweights = cp.array(self.mweights)
 
-        self._calculate_prob(dmodel, view)          # CUDA stuff
-        self._normalize_prob()                      # MPI stuff
-        self._update_model(view, dmodel, dmweights) # CUDA stuff
-        self._normalize_model(dmodel, dmweights, iternum)    # MPI stuff
+        self._calculate_prob(dmodel, view)                  # CUDA stuff
+        self._normalize_prob()                              # MPI stuff
+        self._update_model(view, dmodel, dmweights)         # CUDA stuff
+        self._normalize_model(dmodel, dmweights, iternum)   # MPI stuff
 
     def _calculate_prob(self, dmodel, view):
         msum = float(-self.model.sum())
@@ -104,7 +113,7 @@ class EMC():
                  self.dset.ones, self.dset.multi,
                  self.dset.ones_accum, self.dset.multi_accum,
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                 msum, self.prob[i]))
+                 msum, self.scales, self.prob[i]))
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
