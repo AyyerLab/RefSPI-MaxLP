@@ -29,14 +29,13 @@ class Dataset():
         Dataset object with attributes containing photon locations
     '''
     def __init__(self, photons_file, num_pix, need_scaling=False):
-
         mpool = cp.get_default_memory_pool()
         init_mem = mpool.used_bytes()
         self.photons_file = photons_file
         self.num_pix = num_pix
 
         with h5py.File(self.photons_file, 'r') as fptr:
-            if self.num_pix != fptr['num_pix'][0]:
+            if self.num_pix != fptr['num_pix'][...]:
                 raise AttributeError('Number of pixels in photons file does not match')
             self.num_data = fptr['place_ones'].shape[0]
             try:
