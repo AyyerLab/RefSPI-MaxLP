@@ -12,13 +12,15 @@ from mpi4py import MPI
 import cupy as cp
 from cupyx.scipy import ndimage
 import cupyx
-#cp.cuda.Device(2).use()
 P_MIN = 1.e-6
+MEM_THRESH = 0.8
 
 import kernels
 
 class Dataset():
     def __init__(self, photons_file, num_pix, need_scaling=False):
+        mp = cp.get_default_memory_pool()
+        init_mem = mp.used_bytes()
         self.photons_file = photons_file
         self.num_pix = num_pix
 
@@ -47,12 +49,14 @@ class Dataset():
             if need_scaling:
                 self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum() for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
             self.count_multi = cp.array(self.count_multi)
+        self.mem = mp.used_bytes() - init_mem
 
 class EMC():
     def __init__(self, config_file):
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.rank
         self.num_proc = self.comm.size
+        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
         config = configparser.ConfigParser()
         config.read(config_file)
@@ -72,7 +76,7 @@ class EMC():
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
         etime = time.time()
         if self.rank == 0:
-            print('%d frames with %.3f photons/frame (%f s)' % (self.dset.num_data, self.dset.mean_count, etime-stime))
+            print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
         self.model = np.empty((self.size, self.size))
         if self.rank == 0:
@@ -87,36 +91,51 @@ class EMC():
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
-        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
     def run_iteration(self, iternum=None):
         num_rot_p = self.num_rot // self.num_proc
         if self.rank < self.num_rot % self.num_proc:
             num_rot_p += 1
-        if self.prob.shape != (num_rot_p, self.dset.num_data):
-            self.prob = cp.empty((num_rot_p, self.dset.num_data), dtype='f8')
+        mem_frac = num_rot_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
+        num_blocks = int(np.ceil(mem_frac / MEM_THRESH))
+        block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
+        block_sizes[0:self.dset.num_data % num_blocks] += 1
+        #if len(block_sizes) > 1: print(block_sizes, 'frames in each block')
+        
+        if self.prob.shape != (num_rot_p, block_sizes.max()):
+            self.prob = cp.empty((num_rot_p, block_sizes.max()), dtype='f8')
         view = cp.empty(self.size**2, dtype='f8')
         dmodel = cp.array(self.model)
         dmweights = cp.array(self.mweights)
+        #mp = cp.get_default_memory_pool()
+        #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
-        self._calculate_prob(dmodel, view)                  # CUDA stuff
-        self._normalize_prob()                              # MPI stuff
-        self._update_model(view, dmodel, dmweights)         # CUDA stuff
-        self._normalize_model(dmodel, dmweights, iternum)   # MPI stuff
+        b_start = 0
+        for b in block_sizes:
+            drange = (b_start, b_start + b)
+            self._calculate_prob(dmodel, view, drange)
+            self._normalize_prob()
+            self._update_model(view, dmodel, dmweights, drange)
+            b_start += b
+        self._normalize_model(dmodel, dmweights, iternum)
 
-    def _calculate_prob(self, dmodel, view):
+    def _calculate_prob(self, dmodel, view, drange):
         msum = float(-self.model.sum())
+        s = drange[0]
+        e = drange[1]
+        num_data_b = e - s
+        self.bsize_data = int(np.ceil(num_data_b/32.))
 
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
             kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
                 (dmodel, r/self.num_rot*2.*np.pi, 1.,
                  self.size, 1, view))
             kernels.calc_prob_all((self.bsize_data,), (32,),
-                (view, self.dset.num_data,
-                 self.dset.ones, self.dset.multi,
-                 self.dset.ones_accum, self.dset.multi_accum,
+                (view, num_data_b,
+                 self.dset.ones[s:e], self.dset.multi[s:e],
+                 self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                 msum, self.scales, self.prob[i]))
+                 msum, self.scales[s:e], self.prob[i]))
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
@@ -136,9 +155,12 @@ class EMC():
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         self.prob.clip(a_min=P_MIN, out=self.prob)
 
-    def _update_model(self, view, dmodel, dmweights):
+    def _update_model(self, view, dmodel, dmweights, drange):
         p_norm = self.prob.sum(1)
         h_p_norm = p_norm.get()
+        s = drange[0]
+        e = drange[1]
+        num_data_b = e - s
 
         dmodel[:] = 0
         dmweights[:] = 0
@@ -147,9 +169,9 @@ class EMC():
                 continue
             view[:] = 0
             kernels.merge_all((self.bsize_data,), (32,),
-                (self.prob[i], self.dset.num_data,
-                 self.dset.ones, self.dset.multi,
-                 self.dset.ones_accum, self.dset.multi_accum,
+                (self.prob[i], num_data_b,
+                 self.dset.ones[s:e], self.dset.multi[s:e],
+                 self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                  self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                  view))
             kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
