@@ -92,13 +92,14 @@ calc_prob_all = cp.RawKernel(r'''
                        const int *p_m,
                        const int *c_m,
                        const double init,
+                       const double *scales,
                        double *prob_r) {
         long long d, t ;
         d = blockDim.x * blockIdx.x + threadIdx.x ;
         if (d >= ndata)
             return ;
 
-        prob_r[d] = init ;
+        prob_r[d] = init * scales[d] ;
         for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t)
             prob_r[d] += lview[p_o[t]] ;
         for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t)
