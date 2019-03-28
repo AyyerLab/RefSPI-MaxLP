@@ -83,15 +83,18 @@ class EMC():
             self.scales = self.dset.counts / self.dset.mean_count
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
+        self.prob = cp.array([])
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
+        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
     def run_iteration(self, iternum=None):
         num_rot_p = self.num_rot // self.num_proc
         if self.rank < self.num_rot % self.num_proc:
             num_rot_p += 1
-        self.prob = cp.empty((num_rot_p, self.dset.num_data), dtype='f8')
+        if self.prob.shape != (num_rot_p, self.dset.num_data):
+            self.prob = cp.empty((num_rot_p, self.dset.num_data), dtype='f8')
         view = cp.empty(self.size**2, dtype='f8')
         dmodel = cp.array(self.model)
         dmweights = cp.array(self.mweights)
@@ -126,12 +129,12 @@ class EMC():
         self.comm.Allreduce([rmax_p, MPI.INT], [self.rmax, MPI.INT], op=MPI.MAX)
         max_exp = cp.array(max_exp)
 
-        self.prob = cp.exp(self.prob - max_exp)
+        self.prob = cp.exp(cp.subtract(self.prob, max_exp, self.prob), self.prob)
         psum_p = self.prob.sum(0).get()
         psum = np.empty_like(psum_p)
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
-        self.prob /= cp.array(psum)
-        self.prob[self.prob < P_MIN] = 0
+        self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
+        self.prob.clip(a_min=P_MIN, out=self.prob)
 
     def _update_model(self, view, dmodel, dmweights):
         p_norm = self.prob.sum(1)
