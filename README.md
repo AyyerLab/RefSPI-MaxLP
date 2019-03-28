@@ -25,7 +25,11 @@ $ ./make_data.py -d
 ```
 
 ## Features
-The reconstruction program implements the EMC algorithm to determine the orientations with a Poisson noise model. It currently runs on a single CUDA-capable GPU. The only unknown is the orientation, and the simulated data has pure Poisson noise.
+The reconstruction program implements the EMC algorithm [1] to determine the orientations with a Poisson noise model. It currently runs on a single CUDA-capable GPU. The only unknown is the orientation, and the simulated data has pure Poisson noise.
+
+This corresponds to a real experiment [2] to demonstrate the noise-tolerance of both the EMC algorithm and the X-ray detector used to collect the data. The data from that experiment is available on the CXIDB [ID 18](http://cxidb.org/id-18.html).
+
+The data format convention used in this project are inspired by the [Dragonfly](https://github.com/duaneloh/Dragonfly) repository.
 
 ### Future goals
 These are some of the future enhancements we would like to achieve:
@@ -34,3 +38,8 @@ These are some of the future enhancements we would like to achieve:
  * ~~Scale to multiple GPUs, first on same node, but later across nodes~~ \[DONE [1078a58](https://github.com/kartikayyer/CuPADMAN/commit/1078a58f9ba1cdc48f816a5606c5f56c5b9ce52a)\]
  * ~~Scale to large data sets and fine orientation sampling without running out of memory~~ \[DONE [7728cb9](https://github.com/kartikayyer/CuPADMAN/commit/7728cb9a9f7fb377a4ecff4bb9eb4c8a49c861f9)\]
  * Use CUDATextureObject API for faster rotations (needs modification of cupy)
+
+## References
+ 1. Loh, Ne-Te Duane, and Veit Elser. "Reconstruction algorithm for single-particle diffraction imaging experiments." *Physical Review E* 80, no. 2 (2009): 026705.
+ 2. Philipp, Hugh T., Kartik Ayyer, Mark W. Tate, Veit Elser, and Sol M. Gruner. "Solving structure with sparse, randomly-oriented x-ray data." *Optics express* 20, no. 12 (2012): 13129-13137.
+ 3. Ayyer, Kartik, T-Y. Lan, Veit Elser, and N. Duane Loh. "Dragonfly: an implementation of the expand–maximize–compress algorithm for single-particle imaging." *Journal of applied crystallography* 49, no. 4 (2016): 1320-1335.
