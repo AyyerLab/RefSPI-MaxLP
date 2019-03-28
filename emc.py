@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+'''EMC reconstructor object and script'''
+
 import sys
 import os
 import argparse
@@ -10,17 +12,26 @@ import numpy as np
 import h5py
 from mpi4py import MPI
 import cupy as cp
-from cupyx.scipy import ndimage
-import cupyx
+
+import kernels
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
-import kernels
-
 class Dataset():
+    '''Parses sparse photons dataset from HDF5 file
+
+    Args:
+        photons_file (str): Path to HDF5 photons file
+        num_pix (int): Expected number of pixels in sparse file
+        need_scaling (bool, optional): Whether scaling will be used
+
+    Returns:
+        Dataset object with attributes containing photon locations
+    '''
     def __init__(self, photons_file, num_pix, need_scaling=False):
-        mp = cp.get_default_memory_pool()
-        init_mem = mp.used_bytes()
+
+        mpool = cp.get_default_memory_pool()
+        init_mem = mpool.used_bytes()
         self.photons_file = photons_file
         self.num_pix = num_pix
 
@@ -31,7 +42,8 @@ class Dataset():
             try:
                 self.ones = cp.array(fptr['ones'][:])
             except KeyError:
-                self.ones = cp.array([len(fptr['place_ones'][i]) for i in range(self.num_data)]).astype('i4')
+                self.ones = cp.array([len(fptr['place_ones'][i])
+                                      for i in range(self.num_data)]).astype('i4')
             self.ones_accum = cp.roll(self.ones.cumsum(), 1)
             self.ones_accum[0] = 0
             self.place_ones = cp.array(np.hstack(fptr['place_ones'][:]))
@@ -39,19 +51,31 @@ class Dataset():
             try:
                 self.multi = cp.array(fptr['multi'][:])
             except KeyError:
-                self.multi = cp.array([len(fptr['place_multi'][i]) for i in range(self.num_data)]).astype('i4')
+                self.multi = cp.array([len(fptr['place_multi'][i])
+                                       for i in range(self.num_data)]).astype('i4')
             self.multi_accum = cp.roll(self.multi.cumsum(), 1)
             self.multi_accum[0] = 0
             self.place_multi = cp.array(np.hstack(fptr['place_multi'][:]))
             self.count_multi = np.hstack(fptr['count_multi'][:])
 
-            self.mean_count = float((self.place_ones.shape[0] + self.count_multi.sum()) / self.num_data)
+            self.mean_count = float((self.place_ones.shape[0] +
+                                     self.count_multi.sum()
+                                    ) / self.num_data)
             if need_scaling:
-                self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum() for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
+                self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum()
+                                                    for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
             self.count_multi = cp.array(self.count_multi)
-        self.mem = mp.used_bytes() - init_mem
+        self.mem = mpool.used_bytes() - init_mem
 
 class EMC():
+    '''Reconstructor object using parameters from config file
+
+    Args:
+        config_file (str): Path to configuration file
+
+    The appropriate CUDA device must be selected before initializing the class.
+    Can be used with mpirun, in which case work will be divided among ranks.
+    '''
     def __init__(self, config_file):
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.rank
@@ -76,11 +100,12 @@ class EMC():
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
         etime = time.time()
         if self.rank == 0:
-            print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
+            print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
+                    (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
         self.model = np.empty((self.size, self.size))
         if self.rank == 0:
-            self.model[:] = np.random.random((self.size, self.size)) * self.dset.mean_count / self.dset.num_pix
+            self.model[:] = np.random.random((self.size,)*2) * self.dset.mean_count / self.dset.num_pix
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
         self.mweights = np.zeros((self.size, self.size), dtype='f8')
         if self.need_scaling:
@@ -93,6 +118,15 @@ class EMC():
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
 
     def run_iteration(self, iternum=None):
+        '''Run one iterations of EMc algorithm
+
+        Args:
+            iternum (int, optional): If specified, output is tagged with iteration number
+
+        Current guess is assumed to be in self.model, which is updated. If scaling is included,
+        the scale factors are in self.scales.
+        '''
+
         num_rot_p = self.num_rot // self.num_proc
         if self.rank < self.num_rot % self.num_proc:
             num_rot_p += 1
@@ -101,7 +135,7 @@ class EMC():
         block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
         block_sizes[0:self.dset.num_data % num_blocks] += 1
         #if len(block_sizes) > 1: print(block_sizes, 'frames in each block')
-        
+
         if self.prob.shape != (num_rot_p, block_sizes.max()):
             self.prob = cp.empty((num_rot_p, block_sizes.max()), dtype='f8')
         view = cp.empty(self.size**2, dtype='f8')
@@ -128,14 +162,14 @@ class EMC():
 
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
             kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
-                (dmodel, r/self.num_rot*2.*np.pi, 1.,
-                 self.size, 1, view))
+                    (dmodel, r/self.num_rot*2.*np.pi, 1.,
+                     self.size, 1, view))
             kernels.calc_prob_all((self.bsize_data,), (32,),
-                (view, num_data_b,
-                 self.dset.ones[s:e], self.dset.multi[s:e],
-                 self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
-                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                 msum, self.scales[s:e], self.prob[i]))
+                    (view, num_data_b,
+                     self.dset.ones[s:e], self.dset.multi[s:e],
+                     self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
+                     self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                     msum, self.scales[s:e], self.prob[i]))
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
@@ -169,14 +203,14 @@ class EMC():
                 continue
             view[:] = 0
             kernels.merge_all((self.bsize_data,), (32,),
-                (self.prob[i], num_data_b,
-                 self.dset.ones[s:e], self.dset.multi[s:e],
-                 self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
-                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                 view))
+                    (self.prob[i], num_data_b,
+                     self.dset.ones[s:e], self.dset.multi[s:e],
+                     self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
+                     self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                     view))
             kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
-                (view/p_norm[i], r/self.num_rot*2.*np.pi,
-                 self.size, dmodel, dmweights))
+                    (view/p_norm[i], r/self.num_rot*2.*np.pi,
+                     self.size, dmodel, dmweights))
 
     def _normalize_model(self, dmodel, dmweights, iternum):
         self.model = dmodel.get()
@@ -197,6 +231,7 @@ class EMC():
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
 
 def main():
+    '''Parses command line arguments and launches EMC reconstruction'''
     import socket
     parser = argparse.ArgumentParser(description='In-plane rotation EMC')
     parser.add_argument('num_iter', type=int,
