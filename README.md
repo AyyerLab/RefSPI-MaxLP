@@ -6,10 +6,18 @@ This project includes a simple simulated data generator as well as a reconstruct
 **Note:** Turns out the code's much faster with custom kernels, so some simplicity has been sacrificed for speed.
 
 ## Installation
-This is a pure python package, which has the following dependencies:
+This is a pure python 3 package, which has the following dependencies:
  * cupy, which in turn needs CUDA
  * numpy
  * h5py
+ * mpi4py (for multiple GPUs)
+
+## Features
+The reconstruction program implements the EMC algorithm [1] to determine the orientations with a Poisson noise model. It currently runs on a single CUDA-capable GPU. The only unknown is the orientation, and the simulated data has pure Poisson noise.
+
+This corresponds to a real experiment [2] to demonstrate the noise-tolerance of both the EMC algorithm and the X-ray detector used to collect the data. The data from that experiment is available on the CXIDB [ID 18](http://cxidb.org/id-18.html).
+
+The data format convention used in this project are inspired by the [Dragonfly](https://github.com/duaneloh/Dragonfly) [3] repository.
 
 ## Usage
 To perform a quick simulation, run the following commands:
@@ -19,17 +27,18 @@ $ ./make_data.py
 $ ./emc.py 10
 ```
 
+If you have access to multiple GPUs, you can parallelize the reconstruction using MPI. Before one can run the reconstruction, you have to create a 'devices' file which tells the program which GPU number each rank must run on. This is a simple text file with one number per line, referring to the GPU ID as seen by `nvidia-smi`.
+```
+$ mpirun -np 4 ./emc.py -d devices.txt 10
+```
+In order to see benefits from MPI, you should increase the number of frames and/or the number of rotational samples.
+
+You can also reconstruct real experimental data (instructions [here](convert/README.md)).
+
 A sample `config.ini` file has been provided to specify simulation parameters. One can edit the data generation parameters in the `[make_data]` section and regenerate the frames using the same mask by doing 
 ```
 $ ./make_data.py -d
 ```
-
-## Features
-The reconstruction program implements the EMC algorithm [1] to determine the orientations with a Poisson noise model. It currently runs on a single CUDA-capable GPU. The only unknown is the orientation, and the simulated data has pure Poisson noise.
-
-This corresponds to a real experiment [2] to demonstrate the noise-tolerance of both the EMC algorithm and the X-ray detector used to collect the data. The data from that experiment is available on the CXIDB [ID 18](http://cxidb.org/id-18.html).
-
-The data format convention used in this project are inspired by the [Dragonfly](https://github.com/duaneloh/Dragonfly) repository.
 
 ### Future goals
 These are some of the future enhancements we would like to achieve:
