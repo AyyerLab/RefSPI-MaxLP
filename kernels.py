@@ -22,7 +22,7 @@ slice_gen = cp.RawKernel(r'''
         double ac = cos(angle), as = sin(angle) ;
         double tx = (x - cen) * ac - (y - cen) * as + cen ;
         double ty = (x - cen) * as + (y - cen) * ac + cen ;
-        int ix = tx, iy = ty ;
+        int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
         if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
             return ;
 
@@ -60,7 +60,7 @@ slice_merge = cp.RawKernel(r'''
         double ac = cos(angle), as = sin(angle) ;
         double tx = (x - cen) * ac - (y - cen) * as + cen ;
         double ty = (x - cen) * as + (y - cen) * ac + cen ;
-        int ix = tx, iy = ty ;
+        int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
         if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
             return ;
         double fx = tx - ix, fy = ty - iy ;
