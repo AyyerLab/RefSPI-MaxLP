@@ -261,6 +261,8 @@ def main():
     if rank == 0:
         print('\nIter  time     change')
         sys.stdout.flush()
+        avgtime = 0.
+        numavg = 0
     for i in range(args.num_iter):
         m0 = cp.array(recon.model)
         stime = time.time()
@@ -270,6 +272,11 @@ def main():
             norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
             print('%-6d%-.2e %e' % (i+1, etime-stime, norm))
             sys.stdout.flush()
+            if i > 0:
+                avgtime += etime-stime
+                numavg += 1
+    if rank == 0:
+        print('%.4e s/iteration on average' % (avgtime / numavg))
 
 if __name__ == '__main__':
     main()
