@@ -75,7 +75,8 @@ class EMC():
     The appropriate CUDA device must be selected before initializing the class.
     Can be used with mpirun, in which case work will be divided among ranks.
     '''
-    def __init__(self, config_file):
+    def __init__(self, config_file, num_streams=4):
+        self.num_streams = num_streams
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.rank
         self.num_proc = self.comm.size
@@ -115,6 +116,7 @@ class EMC():
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
+        self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
 
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMc algorithm
@@ -137,7 +139,7 @@ class EMC():
 
         if self.prob.shape != (num_rot_p, block_sizes.max()):
             self.prob = cp.empty((num_rot_p, block_sizes.max()), dtype='f8')
-        view = cp.empty(self.size**2, dtype='f8')
+        views = cp.empty((self.num_streams, self.size**2), dtype='f8')
         dmodel = cp.array(self.model)
         dmweights = cp.array(self.mweights)
         #mp = cp.get_default_memory_pool()
@@ -146,13 +148,13 @@ class EMC():
         b_start = 0
         for b in block_sizes:
             drange = (b_start, b_start + b)
-            self._calculate_prob(dmodel, view, drange)
+            self._calculate_prob(dmodel, views, drange)
             self._normalize_prob()
-            self._update_model(view, dmodel, dmweights, drange)
+            self._update_model(views, dmodel, dmweights, drange)
             b_start += b
         self._normalize_model(dmodel, dmweights, iternum)
 
-    def _calculate_prob(self, dmodel, view, drange):
+    def _calculate_prob(self, dmodel, views, drange):
         msum = float(-self.model.sum())
         s = drange[0]
         e = drange[1]
@@ -160,15 +162,19 @@ class EMC():
         self.bsize_data = int(np.ceil(num_data_b/32.))
 
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
+            snum = i % self.num_streams
+            self.stream_list[snum].use()
             kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
                     (dmodel, r/self.num_rot*2.*np.pi, 1.,
-                     self.size, 1, view))
+                     self.size, 1, views[snum]))
             kernels.calc_prob_all((self.bsize_data,), (32,),
-                    (view, num_data_b,
+                    (views[snum], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                      msum, self.scales[s:e], self.prob[i]))
+        [s.synchronize() for s in self.stream_list]
+        cp.cuda.Stream().null.use()
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
@@ -188,7 +194,7 @@ class EMC():
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         self.prob.clip(a_min=P_MIN, out=self.prob)
 
-    def _update_model(self, view, dmodel, dmweights, drange):
+    def _update_model(self, views, dmodel, dmweights, drange):
         p_norm = self.prob.sum(1)
         h_p_norm = p_norm.get()
         s = drange[0]
@@ -200,16 +206,20 @@ class EMC():
         for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
-            view[:] = 0
+            snum = i % self.num_streams
+            self.stream_list[snum].use()
+            views[snum,:] = 0
             kernels.merge_all((self.bsize_data,), (32,),
                     (self.prob[i], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                     view))
+                     views[snum]))
             kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
-                    (view/p_norm[i], r/self.num_rot*2.*np.pi,
-                     self.size, dmodel, dmweights))
+                    (views[snum], r/self.num_rot*2.*np.pi,
+                     self.size, p_norm[i], dmodel, dmweights))
+        [s.synchronize() for s in self.stream_list]
+        cp.cuda.Stream().null.use()
 
     def _normalize_model(self, dmodel, dmweights, iternum):
         self.model = dmodel.get()
@@ -239,6 +249,8 @@ def main():
                         help='Path to configuration file (default: config.ini)')
     parser.add_argument('-d', '--devices', default=None,
                         help='Path to devices file')
+    parser.add_argument('-s', '--streams', type=int, default=4,
+                        help='Number of streams to use (default=4)')
     args = parser.parse_args()
 
     comm = MPI.COMM_WORLD
@@ -257,7 +269,7 @@ def main():
             sys.stdout.flush()
             cp.cuda.Device(dev).use()
 
-    recon = EMC(args.config_file)
+    recon = EMC(args.config_file, num_streams=args.streams)
     if rank == 0:
         print('\nIter  time     change')
         sys.stdout.flush()
