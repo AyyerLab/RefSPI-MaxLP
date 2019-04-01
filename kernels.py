@@ -48,6 +48,7 @@ slice_merge = cp.RawKernel(r'''
     void slice_merge(const double *view,
                      const double angle,
                      const long long size,
+                     const double *p_norm,
                      double *model,
                      double *mweights) {
         int x = blockIdx.x * blockDim.x + threadIdx.x ;
@@ -65,17 +66,18 @@ slice_merge = cp.RawKernel(r'''
             return ;
         double fx = tx - ix, fy = ty - iy ;
         double cx = 1. - fx, cy = 1. - fy ;
+        double val = view[t] / p_norm[0] ;
 
-        atomicAdd(&model[ix*size + iy], view[t]*cx*cy) ;
+        atomicAdd(&model[ix*size + iy], val*cx*cy) ;
         atomicAdd(&mweights[ix*size + iy], cx*cy) ;
 
-        atomicAdd(&model[(ix+1)*size + iy], view[t]*fx*cy) ;
+        atomicAdd(&model[(ix+1)*size + iy], val*fx*cy) ;
         atomicAdd(&mweights[(ix+1)*size + iy], fx*cy) ;
 
-        atomicAdd(&model[ix*size + (iy+1)], view[t]*cx*fy) ;
+        atomicAdd(&model[ix*size + (iy+1)], val*cx*fy) ;
         atomicAdd(&mweights[ix*size + (iy+1)], cx*fy) ;
 
-        atomicAdd(&model[(ix+1)*size + (iy+1)], view[t]*fx*fy) ;
+        atomicAdd(&model[(ix+1)*size + (iy+1)], val*fx*fy) ;
         atomicAdd(&mweights[(ix+1)*size + (iy+1)], fx*fy) ;
     }
     ''', 'slice_merge')
