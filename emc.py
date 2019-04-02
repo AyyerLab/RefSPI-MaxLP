@@ -64,6 +64,12 @@ class Dataset():
                 self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum()
                                                     for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
             self.count_multi = cp.array(self.count_multi)
+
+            try:
+                self.bg = cp.array(fptr['bg'][:]).ravel()
+                print('Using background model with %.2f photons/frame' % self.bg.sum())
+            except KeyError:
+                self.bg = cp.zeros(self.num_pix)
         self.mem = mpool.used_bytes() - init_mem
 
 class EMC():
@@ -166,7 +172,7 @@ class EMC():
             self.stream_list[snum].use()
             kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
                     (dmodel, r/self.num_rot*2.*np.pi, 1.,
-                     self.size, 1, views[snum]))
+                     self.size, self.dset.bg, 1, views[snum]))
             kernels.calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
@@ -215,9 +221,10 @@ class EMC():
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                      views[snum]))
+            views[snum] = views[snum] / p_norm[i] - self.dset.bg
             kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
                     (views[snum], r/self.num_rot*2.*np.pi,
-                     self.size, p_norm[i], dmodel, dmweights))
+                     self.size, dmodel, dmweights))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
@@ -287,7 +294,7 @@ def main():
             if i > 0:
                 avgtime += etime-stime
                 numavg += 1
-    if rank == 0:
+    if rank == 0 and numavg > 0:
         print('%.4e s/iteration on average' % (avgtime / numavg))
 
 if __name__ == '__main__':
