@@ -21,6 +21,7 @@ class DataGenerator():
         self.num_data = config.getint('make_data', 'num_data')
         self.fluence = config.get('make_data', 'fluence', fallback='constant')
         self.mean_count = config.getfloat('make_data', 'mean_count')
+        self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
         self.out_file = os.path.join(os.path.dirname(config_file),
                                      config.get('make_data', 'out_photons_file'))
 
@@ -28,13 +29,17 @@ class DataGenerator():
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
         self.mask = cp.zeros((self.size, self.size), dtype='f8')
         self.mask_sum = 0
+        self.bgmask = cp.zeros_like(self.mask)
+        self.bgmask_sum = 0
 
-    def make_mask(self, cmin=0.5):
+    def make_mask(self, cmin=0.05, bg=False):
+        mask = self.bgmask if bg else self.mask
+
         num_circ = 20
         mcen = self.size // 2
-        x, y = cp.indices(self.mask.shape, dtype='f8')
+        x, y = cp.indices(mask.shape, dtype='f8')
         pixrad = cp.sqrt((x-mcen)**2 + (y-mcen)**2)
-        self.mask[pixrad < mcen-1] = 1.
+        mask[pixrad < mcen-1] = 1.
         for _ in range(num_circ):
             rad = cp.random.rand(1, dtype='f8') * self.size / 5.
             while True:
@@ -44,20 +49,33 @@ class DataGenerator():
                     break
 
             pixrad = cp.sqrt((x - cen[0])**2 + (y - cen[1])**2)
-            self.mask[pixrad <= rad] *= cmin + (1. - cmin) * (pixrad[pixrad <= rad] / rad)**2
-        self.mask *= self.mean_count / self.mask.sum()
-        self.mask_sum = float(self.mask.sum())
+            mask[pixrad <= rad] *= cmin + (1. - cmin) * (pixrad[pixrad <= rad] / rad)**2
 
-        with h5py.File(self.out_file, 'a') as fptr:
-            if 'solution' in fptr:
-                del fptr['solution']
-            fptr['solution'] = self.mask.get()
+        if bg:
+            mask *= self.bg_count / mask.sum()
+            self.bgmask_sum = float(mask.sum())
+        else:
+            mask *= self.mean_count / mask.sum()
+            self.mask_sum = float(mask.sum())
 
-    def parse_mask(self):
+            with h5py.File(self.out_file, 'a') as fptr:
+                if 'solution' in fptr:
+                    del fptr['solution']
+                fptr['solution'] = mask.get()
+
+    def parse_mask(self, bg=False):
+        mask = self.bgmask if bg else self.mask
+        dset_name = 'bg' if bg else 'solution'
+
         with h5py.File(self.out_file, 'r') as fptr:
-            self.mask = cp.array(fptr['solution'][:])
-        self.mask *= self.mean_count / self.mask.sum()
-        self.mask_sum = float(self.mask.sum())
+            mask = cp.array(fptr[dset_name][:])
+
+        if bg:
+            mask *= self.bg_count / mask.sum()
+            self.bgmask_sum = float(mask.sum())
+        else:
+            mask *= self.mean_count / mask.sum()
+            self.mask_sum = float(mask.sum())
 
     def make_data(self, parse=False):
         if self.mask_sum == 0.:
@@ -65,6 +83,12 @@ class DataGenerator():
                 self.parse_mask()
             else:
                 self.make_mask()
+
+        if self.bg_count is not None:
+            if parse:
+                self.parse_mask(bg=True)
+            else:
+                self.make_mask(bg=True)
 
         with h5py.File(self.out_file, 'a') as fptr:
             if 'ones' in fptr:
@@ -81,6 +105,10 @@ class DataGenerator():
                 del fptr['num_pix']
             if 'true_angles' in fptr:
                 del fptr['true_angles']
+            if 'bg' in fptr:
+                del fptr['bg']
+            if self.bgmask_sum > 0:
+                fptr['bg'] = self.bgmask.get()
             fptr['num_pix'] = np.array([self.size**2])
             dtype = h5py.special_dtype(vlen=np.dtype('i4'))
             place_ones = fptr.create_dataset('place_ones', (self.num_data,), dtype=dtype)
@@ -89,7 +117,6 @@ class DataGenerator():
             ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
             multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
-            #ang = cp.random.rand(self.num_data, dtype='f8')*360
             ang = np.random.rand(self.num_data).astype('f8')*2.*cp.pi
             fptr['true_angles'] = ang
             if self.fluence == 'gamma':
@@ -104,7 +131,7 @@ class DataGenerator():
             stime = time.time()
             for i in range(self.num_data):
                 kernels.slice_gen((bsize_model,)*2, (32,)*2,
-                    (self.mask.ravel(), ang[i], scale[i], self.size, 0, rot_mask))
+                    (self.mask, ang[i], scale[i], self.size, self.bgmask, 0, rot_mask))
                 frame = cp.random.poisson(rot_mask, dtype='i4').ravel()
                 place_ones[i] = cp.where(frame == 1)[0].get()
                 place_multi[i] = cp.where(frame > 1)[0].get()
