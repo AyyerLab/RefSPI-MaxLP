@@ -278,7 +278,7 @@ def main():
 
     recon = EMC(args.config_file, num_streams=args.streams)
     if rank == 0:
-        print('\nIter  time     change')
+        print('\nIter  time(s)  change')
         sys.stdout.flush()
         avgtime = 0.
         numavg = 0
