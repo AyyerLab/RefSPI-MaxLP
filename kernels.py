@@ -30,9 +30,9 @@ slice_gen = cp.RawKernel(r'''
         double fx = tx - ix, fy = ty - iy ;
         double cx = 1. - fx, cy = 1. - fy ;
 
-        view[t] = model[ix*size + iy]*cx*cy + 
+        view[t] = model[ix*size + iy]*cx*cy +
                   model[(ix+1)*size + iy]*fx*cy +
-                  model[ix*size + (iy+1)]*cx*fy + 
+                  model[ix*size + (iy+1)]*cx*fy +
                   model[(ix+1)*size + (iy+1)]*fx*fy ;
         view[t] *= scale ;
         view[t] += bg[t] ;
@@ -44,6 +44,58 @@ slice_gen = cp.RawKernel(r'''
         }
     }
     ''', 'slice_gen')
+
+slice_gen_holo = cp.RawKernel(r'''
+    #include <cupy/complex.cuh>
+    #include <math_constants.h>
+
+    extern "C" __global__
+    void slice_gen_holo(const complex<double> *model,
+                   const double shiftx,
+                   const double shifty,
+                   const double diameter,
+                   const double rel_scale,
+                   const double scale,
+                   const long long size,
+                   const double *bg,
+                   const long long log_flag,
+                   double *view) {
+        int x = blockIdx.x * blockDim.x + threadIdx.x ;
+        int y = blockIdx.y * blockDim.y + threadIdx.y ;
+        if (x > size - 1 || y > size - 1)
+            return ;
+        int t = x*size + y ;
+        if (log_flag)
+            view[t] = -1000. ;
+        else
+            view[t] = 0. ;
+
+        double cen = floor(size / 2.) ;
+        complex<double> ramp, sphere ;
+
+        double phase = 2. * CUDART_PI * ((x-cen) * shiftx + (y-cen) * shifty) / size ;
+        double ramp_r = cos(phase) ;
+        double ramp_i = sin(phase) ;
+        ramp = complex<double>(ramp_r, ramp_i) ;
+
+        double s = sqrt((x-cen)*(x-cen) + (y-cen)*(y-cen)) * CUDART_PI * diameter / size ;
+        if (s == 0.)
+            s = 1.e-5 ;
+        sphere = complex<double>(rel_scale*(sin(s) - s*cos(s)) / (s*s*s), 0) ;
+
+        complex<double> cview = ramp * sphere + model[t] ;
+        view[t] = pow(abs(cview), 2.) ;
+
+        view[t] *= scale ;
+        view[t] += bg[t] ;
+        if (log_flag) {
+            if (view[t] < 1.e-20)
+                view[t] = -1000. ;
+            else
+                view[t] = log(view[t]) ;
+        }
+    }
+    ''', 'slice_gen_holo')
 
 slice_merge = cp.RawKernel(r'''
     extern "C" __global__
