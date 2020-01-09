@@ -92,7 +92,6 @@ class EMC():
         config.read(config_file)
 
         self.size = config.getint('parameters', 'size')
-        self.num_rot = config.getint('emc', 'num_rot')
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.photons_file = os.path.join(os.path.dirname(config_file),
                                          config.get('emc', 'in_photons_file'))
@@ -102,6 +101,28 @@ class EMC():
                                      config.get('emc', 'log_file', fallback='EMC.log'))
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
+        self.sphere_rad = config.getfloat('emc', 'sphere_rad')
+        sx = [float(s) for s in config.get('emc', 'shiftx').split()]
+        sy = [float(s) for s in config.get('emc', 'shifty').split()]
+        self.shifty, self.shiftx = np.meshgrid(np.arange(sx[0], sx[1], sx[2]), np.arange(sy[0], sy[1], sy[2]))
+        self.shiftx = self.shiftx.ravel()
+        self.shifty = self.shifty.ravel()
+        print(self.shiftx)
+        self.num_shift = len(self.shiftx)
+        print(self.num_shift, 'sampled shifts')
+        self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
+        self.x_ind = self.x_ind.ravel() - self.size // 2
+        self.y_ind = self.y_ind.ravel() - self.size // 2
+        rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
+        s = cp.pi * rad * self.sphere_rad / self.size
+        s[s==0] = 1.e-5
+        self.sphere_ft = ((cp.sin(s) - s*cp.cos(s)) / s**3).astype('c16').ravel()
+        self.invmask = cp.zeros(self.size**2, dtype=np.bool)
+        self.invmask[rad<4] = True
+        self.invmask[rad>=self.size//2] = True
+        self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
+        self.invsuppmask[66:119,66:119] = False
+
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
         etime = time.time()
@@ -109,11 +130,11 @@ class EMC():
             print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
                     (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
-        self.model = np.empty((self.size, self.size))
+        self.model = np.empty((self.size**2,), dtype='c16')
         if self.rank == 0:
-            self.model[:] = np.random.random((self.size,)*2) * self.dset.mean_count / self.dset.num_pix
-        self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
-        self.mweights = np.zeros((self.size, self.size), dtype='f8')
+            self.model.real = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+            self.model.imag = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+        self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
         else:
@@ -125,7 +146,7 @@ class EMC():
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
 
     def run_iteration(self, iternum=None):
-        '''Run one iterations of EMc algorithm
+        '''Run one iterations of EMC algorithm
 
         Args:
             iternum (int, optional): If specified, output is tagged with iteration number
@@ -134,20 +155,19 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        num_rot_p = self.num_rot // self.num_proc
-        if self.rank < self.num_rot % self.num_proc:
-            num_rot_p += 1
-        mem_frac = num_rot_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
+        num_shift_p = self.num_shift // self.num_proc
+        if self.rank < self.num_shift % self.num_proc:
+            num_shift_p += 1
+        mem_frac = num_shift_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
         num_blocks = int(np.ceil(mem_frac / MEM_THRESH))
         block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
         block_sizes[0:self.dset.num_data % num_blocks] += 1
-        #if len(block_sizes) > 1: print(block_sizes, 'frames in each block')
 
-        if self.prob.shape != (num_rot_p, block_sizes.max()):
-            self.prob = cp.empty((num_rot_p, block_sizes.max()), dtype='f8')
+        if self.prob.shape != (num_shift_p, block_sizes.max()):
+            self.prob = cp.empty((num_shift_p, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
+        intens = cp.empty((self.num_shift, self.size**2), dtype='f8')
         dmodel = cp.array(self.model)
-        dmweights = cp.array(self.mweights)
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
@@ -156,23 +176,23 @@ class EMC():
             drange = (b_start, b_start + b)
             self._calculate_prob(dmodel, views, drange)
             self._normalize_prob()
-            self._update_model(views, dmodel, dmweights, drange)
+            self._update_model(intens, dmodel, drange)
             b_start += b
-        self._normalize_model(dmodel, dmweights, iternum)
+        self._normalize_model(intens, dmodel, iternum)
 
     def _calculate_prob(self, dmodel, views, drange):
-        msum = float(-self.model.sum())
         s = drange[0]
         e = drange[1]
         num_data_b = e - s
         self.bsize_data = int(np.ceil(num_data_b/32.))
 
-        for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            kernels.slice_gen((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, r/self.num_rot*2.*np.pi, 1.,
-                     self.size, self.dset.bg, 1, views[snum]))
+            kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_rad, 1000.,
+                     1., self.size, self.dset.bg, 1, views[snum]))
+            msum = float(-views[snum].sum())
             kernels.calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
@@ -200,51 +220,72 @@ class EMC():
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         self.prob.clip(a_min=P_MIN, out=self.prob)
 
-    def _update_model(self, views, dmodel, dmweights, drange):
+    def _update_model(self, intens, dmodel, drange):
         p_norm = self.prob.sum(1)
         h_p_norm = p_norm.get()
         s = drange[0]
         e = drange[1]
         num_data_b = e - s
 
-        dmodel[:] = 0
-        dmweights[:] = 0
-        for i, r in enumerate(range(self.rank, self.num_rot, self.num_proc)):
+        intens[:] = 0
+        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            views[snum,:] = 0
             kernels.merge_all((self.bsize_data,), (32,),
                     (self.prob[i], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                     views[snum]))
-            views[snum] = views[snum] / p_norm[i] - self.dset.bg
-            kernels.slice_merge((self.bsize_model,)*2, (32,)*2,
-                    (views[snum], r/self.num_rot*2.*np.pi,
-                     self.size, dmodel, dmweights))
+                     intens[r]))
+            intens[r] = intens[r] / p_norm[i] - self.dset.bg
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
-    def _normalize_model(self, dmodel, dmweights, iternum):
-        self.model = dmodel.get()
-        self.mweights = dmweights.get()
+    def _normalize_model(self, intens, dmodel, iternum):
+        self.comm.Allreduce(MPI.IN_PLACE, [intens.get(), MPI.DOUBLE], op=MPI.SUM)
+
         if self.rank == 0:
-            self.comm.Reduce(MPI.IN_PLACE, [self.model, MPI.DOUBLE], root=0, op=MPI.SUM)
-            self.comm.Reduce(MPI.IN_PLACE, [self.mweights, MPI.DOUBLE], root=0, op=MPI.SUM)
-            self.model[self.mweights > 0] /= self.mweights[self.mweights > 0]
+            iter_init = cp.empty(intens.shape, dtype='c16')
+            iter_init[:] = dmodel.ravel()
+            iter_init.real += cp.random.random(iter_init.shape)
+            iter_curr = self.diffmap(iter_init, intens)
+            for i in range(1, 100):
+                iter_curr = self.diffmap(iter_curr, intens)
+            dmodel = iter_curr.mean(0)
+
+            self.model = dmodel.get()
 
             if iternum is None:
                 np.save('data/model.npy', self.model)
             else:
                 np.save('data/model_%.3d.npy'%iternum, self.model)
-                np.save('data/rmax_%.3d.npy'%iternum, self.rmax/self.num_rot*360.)
-        else:
-            self.comm.Reduce([self.model, MPI.DOUBLE], None, root=0, op=MPI.SUM)
-            self.comm.Reduce([self.mweights, MPI.DOUBLE], None, root=0, op=MPI.SUM)
+                np.save('data/intens_%.3d.npy'%iternum, intens.get())
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
+
+    def proj_divide(self, iter_in, data):
+        iter_out = cp.empty_like(iter_in)
+        for n in range(self.num_shift):
+            rs = 1000.*self.sphere_ft
+            rs *= cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
+            shifted = iter_in[n] + rs
+            iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
+            iter_out[n][self.invmask] = iter_in[n][self.invmask]
+        return iter_out
+
+    def proj_concur(self, iter_in):
+        iter_out = cp.empty_like(iter_in)
+        avg = iter_in.mean(0)
+        favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
+        favg[self.invsuppmask] = 0
+        avg = cp.fft.fftn(cp.fft.ifftshift(favg)).ravel()
+        iter_out[:] = avg
+        return iter_out
+
+    def diffmap(self, iterate, intens):
+        p1 = self.proj_divide(iterate, intens)
+        return iterate + self.proj_concur(2. * p1 - iterate) - p1
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
