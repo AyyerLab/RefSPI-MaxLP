@@ -71,9 +71,11 @@ class DataGenerator():
         if bg:
             mask *= self.bg_count / mask.sum()
             self.bgmask_sum = float(mask.sum())
+            self.bgmask = mask
         else:
-            mask *= self.mean_count / mask.sum()
+            #mask *= self.mean_count / mask.sum()
             self.object_sum = float(mask.sum())
+            self.object = mask
 
     def make_data(self, parse=False):
         if self.object_sum == 0.:
@@ -154,6 +156,8 @@ def main():
     parser.add_argument('-d', '--data_only',
                         help='Generate data only. Use preexisting mask in file',
                         action='store_true', default=False)
+    parser.add_argument('-D', '--device',
+                        help='Device number (default: 0)', type=int, default=0)
     args = parser.parse_args()
 
     datagen = DataGenerator(args.config_file)
