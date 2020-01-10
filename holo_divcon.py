@@ -12,9 +12,9 @@ class HoloRecon():
             zfile = numpy.load('holo_data.npz')
             self.obj, self.init = cp.array(zfile['arr_0']), cp.array(zfile['arr_1'])
         else:
-            obj = self.make_obj()
-            init = gen_init(data.shape)
-            np.savez('holo_data.npz', obj, init)
+            self.obj = self.make_obj()
+            self.init = self.gen_init((len(shiftx),) + self.obj.shape)
+            numpy.savez('holo_data.npz', self.obj, self.init)
         fobj = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.obj)))
         self.invmask = cp.zeros((self.size,)*2, dtype=cp.bool)
         self.invmask[rad<minrad] = True
