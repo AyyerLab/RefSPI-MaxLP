@@ -107,19 +107,19 @@ class EMC():
         self.shifty, self.shiftx = np.meshgrid(np.arange(sx[0], sx[1], sx[2]), np.arange(sy[0], sy[1], sy[2]))
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
-        print(self.shiftx)
         self.num_shift = len(self.shiftx)
         print(self.num_shift, 'sampled shifts')
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
-        rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
-        s = cp.pi * rad * self.sphere_rad / self.size
+        self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
+        s = cp.pi * self.rad * self.sphere_rad / self.size
         s[s==0] = 1.e-5
         self.sphere_ft = ((cp.sin(s) - s*cp.cos(s)) / s**3).astype('c16').ravel()
+        self.sphere = cp.abs(self.sphere_ft)**2
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
-        self.invmask[rad<4] = True
-        self.invmask[rad>=self.size//2] = True
+        self.invmask[self.rad<4] = True
+        self.invmask[self.rad>=self.size//2] = True
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
         self.invsuppmask[66:119,66:119] = False
 
@@ -247,13 +247,17 @@ class EMC():
         self.comm.Allreduce(MPI.IN_PLACE, [intens.get(), MPI.DOUBLE], op=MPI.SUM)
 
         if self.rank == 0:
+            sel = (self.rad > self.size//4)
+            scale = cp.dot(self.sphere[sel], intens.mean(0)[sel]) / cp.linalg.norm(self.sphere[sel])**2
+            #scale = cp.sqrt(scale)
+            print('scale =', scale)
             iter_init = cp.empty(intens.shape, dtype='c16')
             iter_init[:] = dmodel.ravel()
             iter_init.real += cp.random.random(iter_init.shape)
-            iter_curr = self.diffmap(iter_init, intens)
+            iter_curr = self.diffmap(iter_init, intens, scale)
             for i in range(1, 100):
-                iter_curr = self.diffmap(iter_curr, intens)
-            dmodel = iter_curr.mean(0)
+                iter_curr = self.diffmap(iter_curr, intens, scale)
+            dmodel = self.proj_concur(iter_curr)[0]
 
             self.model = dmodel.get()
 
@@ -264,11 +268,13 @@ class EMC():
                 np.save('data/intens_%.3d.npy'%iternum, intens.get())
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
 
-    def proj_divide(self, iter_in, data):
+    def ramp(self, n):
+        return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
+
+    def proj_divide(self, iter_in, data, scale):
         iter_out = cp.empty_like(iter_in)
         for n in range(self.num_shift):
-            rs = 1000.*self.sphere_ft
-            rs *= cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
+            rs = scale * self.sphere_ft * self.ramp(n)
             shifted = iter_in[n] + rs
             iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
             iter_out[n][self.invmask] = iter_in[n][self.invmask]
@@ -283,8 +289,8 @@ class EMC():
         iter_out[:] = avg
         return iter_out
 
-    def diffmap(self, iterate, intens):
-        p1 = self.proj_divide(iterate, intens)
+    def diffmap(self, iterate, intens, scale):
+        p1 = self.proj_divide(iterate, intens, scale)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
 
 def main():
