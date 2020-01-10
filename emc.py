@@ -116,12 +116,16 @@ class EMC():
         s = cp.pi * self.rad * self.sphere_rad / self.size
         s[s==0] = 1.e-5
         self.sphere_ft = ((cp.sin(s) - s*cp.cos(s)) / s**3).astype('c16').ravel()
-        self.sphere = cp.abs(self.sphere_ft)**2
+        self.sphere_intens = cp.abs(self.sphere_ft)**2
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
         self.invsuppmask[66:119,66:119] = False
+        self.probmask = cp.zeros(self.size**2, dtype='i4')
+        self.probmask[self.rad>=self.size//2] = 2
+        self.probmask[self.rad<self.size//4] = 1
+        self.probmask[self.rad<4] = 2
 
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
@@ -132,8 +136,17 @@ class EMC():
             sys.stdout.flush()
         self.model = np.empty((self.size**2,), dtype='c16')
         if self.rank == 0:
-            self.model.real = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
-            self.model.imag = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+            rmodel = np.random.random((self.size,)*2)
+            rmodel[self.invsuppmask.get()] = 0
+            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
+            self.model *= np.sqrt(self.dset.mean_count) / np.linalg.norm(self.model)
+            #self.model.real = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+            #self.model.imag = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+            #with h5py.File('data/holo.h5', 'r') as f:
+            #    sol = f['solution'][:]
+            #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel()
+            self.model[self.invmask.get()] = 0
+            np.save('data/model_000.npy', self.model)
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
@@ -167,7 +180,7 @@ class EMC():
             self.prob = cp.empty((num_shift_p, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
         intens = cp.empty((self.num_shift, self.size**2), dtype='f8')
-        dmodel = cp.array(self.model)
+        dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
@@ -192,9 +205,11 @@ class EMC():
             kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_rad, 1000.,
                      1., self.size, self.dset.bg, 1, views[snum]))
-            msum = float(-views[snum].sum())
+            #msum = float(-views[snum].sum())
+            #views[snum] = cp.log(views[snum])
+            msum = 1.
             kernels.calc_prob_all((self.bsize_data,), (32,),
-                    (views[snum], num_data_b,
+                    (views[snum], self.probmask, num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
@@ -247,16 +262,24 @@ class EMC():
         self.comm.Allreduce(MPI.IN_PLACE, [intens.get(), MPI.DOUBLE], op=MPI.SUM)
 
         if self.rank == 0:
-            sel = (self.rad > self.size//4)
-            scale = cp.dot(self.sphere[sel], intens.mean(0)[sel]) / cp.linalg.norm(self.sphere[sel])**2
-            #scale = cp.sqrt(scale)
-            print('scale =', scale)
-            iter_init = cp.empty(intens.shape, dtype='c16')
-            iter_init[:] = dmodel.ravel()
-            iter_init.real += cp.random.random(iter_init.shape)
-            iter_curr = self.diffmap(iter_init, intens, scale)
-            for i in range(1, 100):
-                iter_curr = self.diffmap(iter_curr, intens, scale)
+            sel = (self.rad > self.size//4) & (self.rad < self.size//2)
+            mscale = cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2
+            fobs = cp.sqrt(intens * mscale)
+            #print('scale =', mscale)
+
+            iter_curr = cp.empty(intens.shape, dtype='c16')
+            #iter_curr[:] = dmodel.ravel()
+            #iter_curr.real += cp.random.random(iter_curr.shape)
+            iter_curr.real = cp.random.random(iter_curr.shape)
+            iter_curr.imag = cp.random.random(iter_curr.shape)
+            iter_curr[:,self.invmask] = 0
+
+            #for i in range(10):
+            #    iter_curr = self.er(iter_curr, fobs)
+            for i in range(50):
+                iter_curr = self.diffmap(iter_curr, fobs)
+            #for i in range(50):
+            #    iter_curr = self.er(iter_curr, fobs)
             dmodel = self.proj_concur(iter_curr)[0]
 
             self.model = dmodel.get()
@@ -266,32 +289,37 @@ class EMC():
             else:
                 np.save('data/model_%.3d.npy'%iternum, self.model)
                 np.save('data/intens_%.3d.npy'%iternum, intens.get())
+                np.save('data/rmax_%.3d.npy'%iternum, self.rmax)
         self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
 
-    def proj_divide(self, iter_in, data, scale):
+    def proj_divide(self, iter_in, data):
         iter_out = cp.empty_like(iter_in)
         for n in range(self.num_shift):
-            rs = scale * self.sphere_ft * self.ramp(n)
+            rs = self.sphere_ft * self.ramp(n)
             shifted = iter_in[n] + rs
             iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
             iter_out[n][self.invmask] = iter_in[n][self.invmask]
         return iter_out
 
-    def proj_concur(self, iter_in):
+    def proj_concur(self, iter_in, supp=True):
         iter_out = cp.empty_like(iter_in)
         avg = iter_in.mean(0)
-        favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
-        favg[self.invsuppmask] = 0
-        avg = cp.fft.fftn(cp.fft.ifftshift(favg)).ravel()
+        if supp:
+            favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
+            favg[self.invsuppmask] = 0
+            avg = cp.fft.fftn(cp.fft.ifftshift(favg)).ravel()
         iter_out[:] = avg
         return iter_out
 
-    def diffmap(self, iterate, intens, scale):
-        p1 = self.proj_divide(iterate, intens, scale)
+    def diffmap(self, iterate, fobs):
+        p1 = self.proj_divide(iterate, fobs)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
+
+    def er(self, iterate, fobs):
+        return self.proj_concur(self.proj_divide(iterate, fobs))
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
