@@ -137,6 +137,7 @@ slice_merge = cp.RawKernel(r'''
 calc_prob_all = cp.RawKernel(r'''
     extern "C" __global__
     void calc_prob_all(const double *lview,
+                       const int *mask,
                        const long long ndata,
                        const int *ones,
                        const int *multi,
@@ -149,15 +150,22 @@ calc_prob_all = cp.RawKernel(r'''
                        const double *scales,
                        double *prob_r) {
         long long d, t ;
+        int pixel ;
         d = blockDim.x * blockIdx.x + threadIdx.x ;
         if (d >= ndata)
             return ;
 
         prob_r[d] = init * scales[d] ;
-        for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t)
-            prob_r[d] += lview[p_o[t]] ;
-        for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t)
-            prob_r[d] += lview[p_m[t]] * c_m[t] ;
+        for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t) {
+            pixel = p_o[t] ;
+            if (mask[pixel] < 1)
+                prob_r[d] += lview[pixel] ;
+        }
+        for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t) {
+            pixel = p_m[t] ;
+            if (mask[pixel] < 1)
+                prob_r[d] += lview[pixel] * c_m[t] ;
+        }
     }
     ''', 'calc_prob_all')
 
