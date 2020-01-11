@@ -9,6 +9,7 @@ import configparser
 import time
 
 import numpy as np
+from scipy import ndimage
 import h5py
 from mpi4py import MPI
 import cupy as cp
@@ -29,6 +30,7 @@ class Dataset():
         Dataset object with attributes containing photon locations
     '''
     def __init__(self, photons_file, num_pix, need_scaling=False):
+        self.powder = None
         mpool = cp.get_default_memory_pool()
         init_mem = mpool.used_bytes()
         self.photons_file = photons_file
@@ -72,6 +74,17 @@ class Dataset():
                 self.bg = cp.zeros(self.num_pix)
         self.mem = mpool.used_bytes() - init_mem
 
+    def get_powder(self):
+        if self.powder is not None:
+            return self.powder
+
+        self.powder = np.zeros(self.num_pix)
+        np.add.at(self.powder, self.place_ones.get(), 1)
+        np.add.at(self.powder, self.place_multi.get(), self.count_multi.get())
+        self.powder /= self.num_data
+        self.powder = cp.array(self.powder)
+        return self.powder
+
 class EMC():
     '''Reconstructor object using parameters from config file
 
@@ -101,7 +114,7 @@ class EMC():
                                      config.get('emc', 'log_file', fallback='EMC.log'))
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
-        self.sphere_rad = config.getfloat('emc', 'sphere_rad')
+        self.sphere_dia = config.getfloat('emc', 'sphere_dia')
         sx = [float(s) for s in config.get('emc', 'shiftx').split()]
         sy = [float(s) for s in config.get('emc', 'shifty').split()]
         self.shifty, self.shiftx = np.meshgrid(np.arange(sx[0], sx[1], sx[2]), np.arange(sy[0], sy[1], sy[2]))
@@ -113,7 +126,7 @@ class EMC():
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
-        s = cp.pi * self.rad * self.sphere_rad / self.size
+        s = cp.pi * self.rad * self.sphere_dia / self.size
         s[s==0] = 1.e-5
         self.sphere_ft = ((cp.sin(s) - s*cp.cos(s)) / s**3).astype('c16').ravel()
         self.sphere_intens = cp.abs(self.sphere_ft)**2
@@ -129,6 +142,7 @@ class EMC():
 
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
+        self.powder = self.dset.get_powder()
         etime = time.time()
         if self.rank == 0:
             print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
@@ -139,12 +153,11 @@ class EMC():
             rmodel = np.random.random((self.size,)*2)
             rmodel[self.invsuppmask.get()] = 0
             self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
-            self.model *= np.sqrt(self.dset.mean_count) / np.linalg.norm(self.model)
-            #self.model.real = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
-            #self.model.imag = np.random.random(self.size**2) * self.dset.mean_count / self.dset.num_pix
+            #self.model *= np.sqrt(self.dset.mean_count) / np.linalg.norm(self.model)
+            self.model /= 2e3
             #with h5py.File('data/holo.h5', 'r') as f:
             #    sol = f['solution'][:]
-            #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel()
+            #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
             self.model[self.invmask.get()] = 0
             np.save('data/model_000.npy', self.model)
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
@@ -198,16 +211,23 @@ class EMC():
         e = drange[1]
         num_data_b = e - s
         self.bsize_data = int(np.ceil(num_data_b/32.))
+        selmask = (self.probmask < 1)
+        vscale = 1.
 
         for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_rad, 1000.,
-                     1., self.size, self.dset.bg, 1, views[snum]))
-            #msum = float(-views[snum].sum())
-            #views[snum] = cp.log(views[snum])
-            msum = 1.
+                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia, 1.,
+                     1., self.size, self.dset.bg, 0, views[snum]))
+            if vscale == 1.:
+                vscale = self.powder[selmask].sum() / views[snum][selmask].sum() 
+                #print('vscale =', vscale)
+            msum = float(-views[snum][selmask].sum()) * vscale
+            #if i < 5:
+            #    print(i, ':', msum)
+            #    np.save('data/view_%.3d.npy'%i, views[snum].get())
+            views[snum] = cp.log(views[snum]) + cp.log(vscale)
             kernels.calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], self.probmask, num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
@@ -234,6 +254,7 @@ class EMC():
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         self.prob.clip(a_min=P_MIN, out=self.prob)
+        np.save('data/prob.npy', self.prob.get())
 
     def _update_model(self, intens, dmodel, drange):
         p_norm = self.prob.sum(1)
@@ -263,7 +284,7 @@ class EMC():
 
         if self.rank == 0:
             sel = (self.rad > self.size//4) & (self.rad < self.size//2)
-            mscale = cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2
+            mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)
             fobs = cp.sqrt(intens * mscale)
             #print('scale =', mscale)
 
@@ -283,6 +304,10 @@ class EMC():
             dmodel = self.proj_concur(iter_curr)[0]
 
             self.model = dmodel.get()
+            amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
+            famodel = ndimage.gaussian_filter(amodel, 3)
+            thresh = np.sort(famodel.ravel())[int(0.94*amodel.size)]
+            self.invsuppmask = cp.array(famodel < thresh)
 
             if iternum is None:
                 np.save('data/model.npy', self.model)
@@ -290,7 +315,9 @@ class EMC():
                 np.save('data/model_%.3d.npy'%iternum, self.model)
                 np.save('data/intens_%.3d.npy'%iternum, intens.get())
                 np.save('data/rmax_%.3d.npy'%iternum, self.rmax)
-        self.comm.Bcast([self.model, MPI.DOUBLE], root=0)
+                np.save('data/invsupp_%.3d.npy'%iternum, self.invsuppmask)
+            self.model[self.invmask.get()] = 0
+        self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
