@@ -139,6 +139,7 @@ class EMC():
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//5] = 1
         self.probmask[self.rad<4] = 2
+        self.sphere_ramps = [self.ramp(i)*self.sphere_ft for i in range(self.num_shift)]
 
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
@@ -226,7 +227,6 @@ class EMC():
                      1., self.size, self.dset.bg, 0, views[snum]))
             msums[i] = views[snum][selmask].sum()
             sum_views[snum] += views[snum]
-            num_views[snum] += 1
         vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.prob.shape[0]
 
         for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
@@ -298,11 +298,12 @@ class EMC():
             iter_curr = cp.empty(intens.shape, dtype='c16')
             iter_curr[:] = dmodel.ravel()
             iter_curr[:,self.invmask] = 0
+            iter_p1 = cp.empty_like(iter_curr)
 
             #for i in range(10):
             #    iter_curr = self.er(iter_curr, fobs)
             for i in range(50):
-                iter_curr = self.diffmap(iter_curr, fobs)
+                iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
             dmodel = self.proj_concur(iter_curr)[0]
@@ -326,14 +327,13 @@ class EMC():
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
 
-    def proj_divide(self, iter_in, data):
-        iter_out = cp.empty_like(iter_in)
+    def proj_divide(self, iter_in, data, iter_out):
         for n in range(self.num_shift):
-            rs = self.sphere_ft * self.ramp(n)
+            #rs = self.sphere_ft * self.ramp(n)
+            rs = self.sphere_ramps[n] # Only works with fixed sphere size
             shifted = iter_in[n] + rs
             iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
             iter_out[n][self.invmask] = iter_in[n][self.invmask]
-        return iter_out
 
     def proj_concur(self, iter_in, supp=True):
         iter_out = cp.empty_like(iter_in)
@@ -345,12 +345,13 @@ class EMC():
         iter_out[:] = avg
         return iter_out
 
-    def diffmap(self, iterate, fobs):
-        p1 = self.proj_divide(iterate, fobs)
+    def diffmap(self, iterate, fobs, p1):
+        self.proj_divide(iterate, fobs, p1)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
 
-    def er(self, iterate, fobs):
-        return self.proj_concur(self.proj_divide(iterate, fobs))
+    def er(self, iterate, fobs, p1):
+        self.proj_divide(iterate, fobs, p1)
+        return self.proj_concur(p1)
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
