@@ -97,53 +97,59 @@ class DataGenerator():
         mask[pixrad<4] = 0
         mask[pixrad>=cen] = 0
 
-        with h5py.File(self.out_file, 'a') as fptr:
-            if 'ones' in fptr: del fptr['ones']
-            if 'multi' in fptr: del fptr['multi']
-            if 'place_ones' in fptr: del fptr['place_ones']
-            if 'place_multi' in fptr: del fptr['place_multi']
-            if 'count_multi' in fptr: del fptr['count_multi']
-            if 'num_pix' in fptr: del fptr['num_pix']
-            if 'true_shifts' in fptr: del fptr['true_shifts']
-            if 'bg' in fptr: del fptr['bg']
-            if 'scale' in fptr: del fptr['scale']
+        fptr = h5py.File(self.out_file, 'a')
+        if 'ones' in fptr: del fptr['ones']
+        if 'multi' in fptr: del fptr['multi']
+        if 'place_ones' in fptr: del fptr['place_ones']
+        if 'place_multi' in fptr: del fptr['place_multi']
+        if 'count_multi' in fptr: del fptr['count_multi']
+        if 'num_pix' in fptr: del fptr['num_pix']
+        if 'true_shifts' in fptr: del fptr['true_shifts']
+        if 'true_diameters' in fptr: del fptr['true_diameters']
+        if 'bg' in fptr: del fptr['bg']
+        if 'scale' in fptr: del fptr['scale']
 
-            if self.bgmask_sum > 0:
-                fptr['bg'] = self.bgmask.get()
-            fptr['num_pix'] = np.array([self.size**2])
-            dtype = h5py.special_dtype(vlen=np.dtype('i4'))
-            place_ones = fptr.create_dataset('place_ones', (self.num_data,), dtype=dtype)
-            place_multi = fptr.create_dataset('place_multi', (self.num_data,), dtype=dtype)
-            count_multi = fptr.create_dataset('count_multi', (self.num_data,), dtype=dtype)
-            ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
-            multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
+        if self.bgmask_sum > 0:
+            fptr['bg'] = self.bgmask.get()
+        fptr['num_pix'] = np.array([self.size**2])
+        dtype = h5py.special_dtype(vlen=np.dtype('i4'))
+        place_ones = fptr.create_dataset('place_ones', (self.num_data,), dtype=dtype)
+        place_multi = fptr.create_dataset('place_multi', (self.num_data,), dtype=dtype)
+        count_multi = fptr.create_dataset('count_multi', (self.num_data,), dtype=dtype)
+        ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
+        multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
-            shifts = np.random.random((self.num_data, 2))*6 - 3
-            fptr['true_shifts'] = shifts
-            if self.fluence == 'gamma':
-                scale = np.random.gamma(2., 0.5, self.num_data)
-            else:
-                scale = np.ones(self.num_data, dtype='f8')
-            fptr['scale'] = scale
-            
-            view = cp.zeros(self.size**2, dtype='f8')
-            model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
-            bsize_model = int(np.ceil(self.size/32.))
-            stime = time.time()
-            for i in range(self.num_data):
-                kernels.slice_gen_holo((bsize_model,)*2, (32,)*2,
-                    (model, shifts[i,0], shifts[i,1], 7., 1000., scale[i], self.size, self.bgmask, 0, view))
-                view *= mask.ravel()
-                view *= self.mean_count / view.sum()
-                frame = cp.random.poisson(view, dtype='i4').ravel()
-                place_ones[i] = cp.where(frame == 1)[0].get()
-                place_multi[i] = cp.where(frame > 1)[0].get()
-                count_multi[i] = frame[frame > 1].get()
-                ones[i] = place_ones[i].shape[0]
-                multi[i] = place_multi[i].shape[0]
-                sys.stderr.write('\rWritten %d/%d frames (%d)  ' % (i+1, self.num_data, int(frame.sum())))
-            etime = time.time()
-            sys.stderr.write('\nTime taken (make_data): %f s\n' % (etime-stime))
+        shifts = np.random.random((self.num_data, 2))*6 - 3
+        fptr['true_shifts'] = shifts
+        if self.fluence == 'gamma':
+            scale = np.random.gamma(2., 0.5, self.num_data)
+        else:
+            scale = np.ones(self.num_data, dtype='f8')
+        fptr['scale'] = scale
+        diameters = np.random.randn(self.num_data)*0.5 + 7.
+        fptr['true_diameters'] = diameters
+        #rel_scales = diameters**3 * 1000. / 7**3
+        #scale *= rel_scales/1.e3
+
+        view = cp.zeros(self.size**2, dtype='f8')
+        model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
+        bsize_model = int(np.ceil(self.size/32.))
+        stime = time.time()
+        for i in range(self.num_data):
+            kernels.slice_gen_holo((bsize_model,)*2, (32,)*2,
+                (model, shifts[i,0], shifts[i,1], diameters[i], 1000., scale[i], self.size, self.bgmask, 0, view))
+            view *= mask.ravel()
+            view *= self.mean_count / view.sum()
+            frame = cp.random.poisson(view, dtype='i4').ravel()
+            place_ones[i] = cp.where(frame == 1)[0].get()
+            place_multi[i] = cp.where(frame > 1)[0].get()
+            count_multi[i] = frame[frame > 1].get()
+            ones[i] = place_ones[i].shape[0]
+            multi[i] = place_multi[i].shape[0]
+            sys.stderr.write('\rWritten %d/%d frames (%d)  ' % (i+1, self.num_data, int(frame.sum())))
+        etime = time.time()
+        sys.stderr.write('\nTime taken (make_data): %f s\n' % (etime-stime))
+        fptr.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Padman data generator')
