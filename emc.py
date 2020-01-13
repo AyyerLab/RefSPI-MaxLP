@@ -114,22 +114,19 @@ class EMC():
                                      config.get('emc', 'log_file', fallback='EMC.log'))
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
-        self.sphere_dia = config.getfloat('emc', 'sphere_dia')
-        sx = [float(s) for s in config.get('emc', 'shiftx').split()]
-        sy = [float(s) for s in config.get('emc', 'shifty').split()]
-        self.shifty, self.shiftx = np.meshgrid(np.linspace(sx[0], sx[1], sx[2]), np.linspace(sy[0], sy[1], sy[2]))
+        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
+        sx = (float(s) for s in config.get('emc', 'shiftx').split())
+        sy = (float(s) for s in config.get('emc', 'shifty').split())
+        self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(*sx), np.linspace(*sy), np.linspace(*dia), indexing='ij')
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
-        self.num_shift = len(self.shiftx)
-        print(self.num_shift, 'sampled shifts')
+        self.sphere_dia = self.sphere_dia.ravel()
+        self.num_states = len(self.shiftx)
+        print(self.num_states, 'sampled states')
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
-        s = cp.pi * self.rad * self.sphere_dia / self.size
-        s[s==0] = 1.e-5
-        self.sphere_ft = ((cp.sin(s) - s*cp.cos(s)) / s**3).astype('c16').ravel()
-        self.sphere_intens = cp.abs(self.sphere_ft)**2
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
@@ -139,7 +136,8 @@ class EMC():
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//5] = 1
         self.probmask[self.rad<4] = 2
-        self.sphere_ramps = [self.ramp(i)*self.sphere_ft for i in range(self.num_shift)]
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states)]
+        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
 
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
@@ -158,7 +156,7 @@ class EMC():
             self.model /= 2e3
 
             # Solution as init
-            #with h5py.File('data/holo.h5', 'r') as f:
+            #with h5py.File('data/holo_dia.h5', 'r') as f:
             #    sol = f['solution'][:]
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
@@ -185,18 +183,18 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        num_shift_p = self.num_shift // self.num_proc
-        if self.rank < self.num_shift % self.num_proc:
-            num_shift_p += 1
-        mem_frac = num_shift_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
+        num_states_p = self.num_states // self.num_proc
+        if self.rank < self.num_states % self.num_proc:
+            num_states_p += 1
+        mem_frac = num_states_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
         num_blocks = int(np.ceil(mem_frac / MEM_THRESH))
         block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
         block_sizes[0:self.dset.num_data % num_blocks] += 1
 
-        if self.prob.shape != (num_shift_p, block_sizes.max()):
-            self.prob = cp.empty((num_shift_p, block_sizes.max()), dtype='f8')
+        if self.prob.shape != (num_states_p, block_sizes.max()):
+            self.prob = cp.empty((num_states_p, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
-        intens = cp.empty((self.num_shift, self.size**2), dtype='f8')
+        intens = cp.empty((self.num_states, self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -217,23 +215,23 @@ class EMC():
         self.bsize_data = int(np.ceil(num_data_b/32.))
         selmask = (self.probmask < 1)
         sum_views = cp.zeros_like(views)
-        msums = cp.empty(len(np.arange(self.rank, self.num_shift, self.num_proc)))
+        msums = cp.empty(self.prob.shape[0])
 
-        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia, 1.,
+                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
                      1., self.size, self.dset.bg, 0, views[snum]))
             msums[i] = views[snum][selmask].sum()
             sum_views[snum] += views[snum]
         vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.prob.shape[0]
 
-        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia, 1.,
+                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
                      1., self.size, self.dset.bg, 1, views[snum]))
             kernels.calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], self.probmask, num_data_b,
@@ -271,7 +269,7 @@ class EMC():
         num_data_b = e - s
 
         intens[:] = 0
-        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
             snum = i % self.num_streams
@@ -327,10 +325,18 @@ class EMC():
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
 
+    def sphere(self, n, diameter=None):
+        if n is None:
+            dia = diameter
+        else:
+            dia = self.sphere_dia[n]
+        s = cp.pi * self.rad * dia / self.size
+        s[s==0] = 1.e-5
+        return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
+
     def proj_divide(self, iter_in, data, iter_out):
-        for n in range(self.num_shift):
-            #rs = self.sphere_ft * self.ramp(n)
-            rs = self.sphere_ramps[n] # Only works with fixed sphere size
+        for n in range(self.num_states):
+            rs = self.sphere_ramps[n]
             shifted = iter_in[n] + rs
             iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
             iter_out[n][self.invmask] = iter_in[n][self.invmask]
