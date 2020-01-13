@@ -117,7 +117,7 @@ class EMC():
         self.sphere_dia = config.getfloat('emc', 'sphere_dia')
         sx = [float(s) for s in config.get('emc', 'shiftx').split()]
         sy = [float(s) for s in config.get('emc', 'shifty').split()]
-        self.shifty, self.shiftx = np.meshgrid(np.arange(sx[0], sx[1], sx[2]), np.arange(sy[0], sy[1], sy[2]))
+        self.shifty, self.shiftx = np.meshgrid(np.linspace(sx[0], sx[1], sx[2]), np.linspace(sy[0], sy[1], sy[2]))
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.num_shift = len(self.shiftx)
@@ -137,7 +137,7 @@ class EMC():
         self.invsuppmask[66:119,66:119] = False
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
-        self.probmask[self.rad<self.size//4] = 1
+        self.probmask[self.rad<self.size//5] = 1
         self.probmask[self.rad<4] = 2
 
         stime = time.time()
@@ -150,14 +150,17 @@ class EMC():
             sys.stdout.flush()
         self.model = np.empty((self.size**2,), dtype='c16')
         if self.rank == 0:
+            # Random model
             rmodel = np.random.random((self.size,)*2)
             rmodel[self.invsuppmask.get()] = 0
             self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
-            #self.model *= np.sqrt(self.dset.mean_count) / np.linalg.norm(self.model)
             self.model /= 2e3
+
+            # Solution as init
             #with h5py.File('data/holo.h5', 'r') as f:
             #    sol = f['solution'][:]
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
+
             self.model[self.invmask.get()] = 0
             np.save('data/model_000.npy', self.model)
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
@@ -212,7 +215,8 @@ class EMC():
         num_data_b = e - s
         self.bsize_data = int(np.ceil(num_data_b/32.))
         selmask = (self.probmask < 1)
-        vscale = 1.
+        sum_views = cp.zeros_like(views)
+        msums = cp.empty(len(np.arange(self.rank, self.num_shift, self.num_proc)))
 
         for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
             snum = i % self.num_streams
@@ -220,20 +224,23 @@ class EMC():
             kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia, 1.,
                      1., self.size, self.dset.bg, 0, views[snum]))
-            if vscale == 1.:
-                vscale = self.powder[selmask].sum() / views[snum][selmask].sum() 
-                #print('vscale =', vscale)
-            msum = float(-views[snum][selmask].sum()) * vscale
-            #if i < 5:
-            #    print(i, ':', msum)
-            #    np.save('data/view_%.3d.npy'%i, views[snum].get())
-            views[snum] = cp.log(views[snum]) + cp.log(vscale)
+            msums[i] = views[snum][selmask].sum()
+            sum_views[snum] += views[snum]
+            num_views[snum] += 1
+        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.prob.shape[0]
+
+        for i, r in enumerate(range(self.rank, self.num_shift, self.num_proc)):
+            snum = i % self.num_streams
+            self.stream_list[snum].use()
+            kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                    (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia, 1.,
+                     1., self.size, self.dset.bg, 1, views[snum]))
             kernels.calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], self.probmask, num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                      self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                     msum, self.scales[s:e], self.prob[i]))
+                     -float(msums[i]*vscale), self.scales[s:e], self.prob[i]))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
@@ -253,7 +260,7 @@ class EMC():
         psum = np.empty_like(psum_p)
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
-        self.prob.clip(a_min=P_MIN, out=self.prob)
+        #self.prob.clip(a_min=P_MIN, out=self.prob)
         np.save('data/prob.npy', self.prob.get())
 
     def _update_model(self, intens, dmodel, drange):
@@ -286,13 +293,10 @@ class EMC():
             sel = (self.rad > self.size//4) & (self.rad < self.size//2)
             mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)
             fobs = cp.sqrt(intens * mscale)
-            #print('scale =', mscale)
+            #print('mscale =', mscale)
 
             iter_curr = cp.empty(intens.shape, dtype='c16')
-            #iter_curr[:] = dmodel.ravel()
-            #iter_curr.real += cp.random.random(iter_curr.shape)
-            iter_curr.real = cp.random.random(iter_curr.shape)
-            iter_curr.imag = cp.random.random(iter_curr.shape)
+            iter_curr[:] = dmodel.ravel()
             iter_curr[:,self.invmask] = 0
 
             #for i in range(10):
