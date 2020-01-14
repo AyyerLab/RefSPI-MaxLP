@@ -193,3 +193,29 @@ merge_all = cp.RawKernel(r'''
     }
     ''', 'merge_all')
 
+proj_divide = cp.RawKernel(r'''
+    #include <cupy/complex.cuh>
+    #include <math_constants.h>
+
+    extern "C" __global__
+    void proj_divide(const complex<double> *iter_in,
+                     const double *fobs,
+                     const complex<double> *sphere_ramp,
+                     const int *invmask,
+                     const long long size,
+                     complex<double> *iter_out) {
+        int t = blockIdx.x * blockDim.x + threadIdx.x ;
+        if (t >= size*size)
+            return ;
+
+        complex<double> shifted ;
+
+        if (invmask[t] == 0) {
+            shifted = iter_in[t] + sphere_ramp[t] ;
+            iter_out[t] = shifted * fobs[t] / abs(shifted) - sphere_ramp[t] ;
+        }
+        else {
+            iter_out[t] = iter_in[t] ;
+        }
+    }
+    ''', 'proj_divide')

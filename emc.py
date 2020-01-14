@@ -130,6 +130,7 @@ class EMC():
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
+        self.intinvmask = self.invmask.astype('i4')
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
         self.invsuppmask[66:119,66:119] = False
         self.probmask = cp.zeros(self.size**2, dtype='i4')
@@ -307,10 +308,11 @@ class EMC():
             dmodel = self.proj_concur(iter_curr)[0]
 
             self.model = dmodel.get()
-            amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
-            famodel = ndimage.gaussian_filter(amodel, 3)
-            thresh = np.sort(famodel.ravel())[int(0.94*amodel.size)]
-            self.invsuppmask = cp.array(famodel < thresh)
+            if iternum < 5 or iternum % 5 == 0:
+                amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
+                famodel = ndimage.gaussian_filter(amodel, 3)
+                thresh = np.sort(famodel.ravel())[int(0.94*amodel.size)]
+                self.invsuppmask = cp.array(famodel < thresh)
 
             if iternum is None:
                 np.save('data/model.npy', self.model)
@@ -336,10 +338,14 @@ class EMC():
 
     def proj_divide(self, iter_in, data, iter_out):
         for n in range(self.num_states):
-            rs = self.sphere_ramps[n]
-            shifted = iter_in[n] + rs
-            iter_out[n] = shifted * data[n] / cp.abs(shifted) - rs
-            iter_out[n][self.invmask] = iter_in[n][self.invmask]
+            snum = n % self.num_streams
+            self.stream_list[snum].use()
+
+            kernels.proj_divide((self.size*self.size//32 + 1,), (32,),
+                                (iter_in[n], data[n], self.sphere_ramps[n],
+                                 self.intinvmask, self.size, iter_out[n]))
+        [s.synchronize() for s in self.stream_list]
+        cp.cuda.Stream().null.use()
 
     def proj_concur(self, iter_in, supp=True):
         iter_out = cp.empty_like(iter_in)
