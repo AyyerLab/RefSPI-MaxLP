@@ -14,7 +14,6 @@ import h5py
 from mpi4py import MPI
 import cupy as cp
 
-import kernels
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
@@ -135,7 +134,7 @@ class EMC():
         self.invsuppmask[66:119,66:119] = False
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
-        self.probmask[self.rad<self.size//5] = 1
+        self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
         self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states)]
         self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
@@ -169,6 +168,13 @@ class EMC():
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
         self.prob = cp.array([])
+        with open('kernels.cu', 'r') as f:
+            kernel_code = f.read()
+        kernels = cp.RawModule(kernel_code)
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
+        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
+        self.k_merge_all = kernels.get_function('merge_all')
+        self.k_proj_divide = kernels.get_function('proj_divide')
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
@@ -221,7 +227,7 @@ class EMC():
         for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
                      1., self.size, self.dset.bg, 0, views[snum]))
             msums[i] = views[snum][selmask].sum()
@@ -231,10 +237,10 @@ class EMC():
         for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            kernels.slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
                      1., self.size, self.dset.bg, 1, views[snum]))
-            kernels.calc_prob_all((self.bsize_data,), (32,),
+            self.k_calc_prob_all((self.bsize_data,), (32,),
                     (views[snum], self.probmask, num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
@@ -275,7 +281,7 @@ class EMC():
                 continue
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            kernels.merge_all((self.bsize_data,), (32,),
+            self.k_merge_all((self.bsize_data,), (32,),
                     (self.prob[i], num_data_b,
                      self.dset.ones[s:e], self.dset.multi[s:e],
                      self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
@@ -341,7 +347,7 @@ class EMC():
             snum = n % self.num_streams
             self.stream_list[snum].use()
 
-            kernels.proj_divide((self.size*self.size//32 + 1,), (32,),
+            self.k_proj_divide((self.size*self.size//32 + 1,), (32,),
                                 (iter_in[n], data[n], self.sphere_ramps[n],
                                  self.intinvmask, self.size, iter_out[n]))
         [s.synchronize() for s in self.stream_list]
