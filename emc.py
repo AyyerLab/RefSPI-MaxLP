@@ -105,6 +105,7 @@ class EMC():
 
         self.size = config.getint('parameters', 'size')
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
+        self.num_rot = config.getint('emc', 'num_rot')
         self.photons_file = os.path.join(os.path.dirname(config_file),
                                          config.get('emc', 'in_photons_file'))
         self.output_folder = os.path.join(os.path.dirname(config_file),
@@ -171,6 +172,8 @@ class EMC():
         with open('kernels.cu', 'r') as f:
             kernel_code = f.read()
         kernels = cp.RawModule(kernel_code)
+        self.k_slice_gen = kernels.get_function('slice_gen')
+        self.k_slice_merge = kernels.get_function('slice_merge')
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
         self.k_merge_all = kernels.get_function('merge_all')
@@ -190,16 +193,14 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        num_states_p = self.num_states // self.num_proc
-        if self.rank < self.num_states % self.num_proc:
-            num_states_p += 1
-        mem_frac = num_states_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
+        self.num_states_p = np.arange(self.rank, self.num_states, self.num_proc).size
+        mem_frac = self.num_states_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
         num_blocks = int(np.ceil(mem_frac / MEM_THRESH))
         block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
         block_sizes[0:self.dset.num_data % num_blocks] += 1
 
-        if self.prob.shape != (num_states_p, block_sizes.max()):
-            self.prob = cp.empty((num_states_p, block_sizes.max()), dtype='f8')
+        if self.prob.shape != (self.num_states_p*self.num_rot, block_sizes.max()):
+            self.prob = cp.empty((self.num_states_p*self.num_rot, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
         intens = cp.empty((self.num_states, self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
@@ -222,7 +223,8 @@ class EMC():
         self.bsize_data = int(np.ceil(num_data_b/32.))
         selmask = (self.probmask < 1)
         sum_views = cp.zeros_like(views)
-        msums = cp.empty(self.prob.shape[0])
+        msums = cp.empty(self.num_states_p)
+        rot_views = cp.empty_like(views)
 
         for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
@@ -232,26 +234,34 @@ class EMC():
                      1., self.size, self.dset.bg, 0, views[snum]))
             msums[i] = views[snum][selmask].sum()
             sum_views[snum] += views[snum]
-        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.prob.shape[0]
+        [s.synchronize() for s in self.stream_list]
+        cp.cuda.Stream().null.use()
+        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.num_states_p
 
         for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
-                     1., self.size, self.dset.bg, 1, views[snum]))
-            self.k_calc_prob_all((self.bsize_data,), (32,),
-                    (views[snum], self.probmask, num_data_b,
-                     self.dset.ones[s:e], self.dset.multi[s:e],
-                     self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
-                     self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                     -float(msums[i]*vscale), self.scales[s:e], self.prob[i]))
+                     1., self.size, self.dset.bg, 0, views[snum]))
+
+            for j in range(self.num_rot):
+                self.k_slice_gen((self.bsize_model,)*2, (32,)*2,
+                        (views[snum], j*2.*np.pi/self.num_rot, 1.,
+                         self.size, self.dset.bg, 1, rot_views[snum]))
+                self.k_calc_prob_all((self.bsize_data,), (32,),
+                        (rot_views[snum], self.probmask, num_data_b,
+                         self.dset.ones[s:e], self.dset.multi[s:e],
+                         self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
+                         self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                         -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
-        rmax_p = (self.prob.argmax(axis=0) * self.num_proc + self.rank).astype('i4').get()
+        rmax_p = self.prob.argmax(axis=0).get().astype('i4')
+        rmax_p = ((rmax_p//self.num_rot)*self.num_proc + self.rank)*self.num_rot + rmax_p%self.num_rot
         max_exp = np.empty_like(max_exp_p)
         self.rmax = np.empty_like(rmax_p)
 
@@ -269,24 +279,35 @@ class EMC():
         np.save('data/prob.npy', self.prob.get())
 
     def _update_model(self, intens, dmodel, drange):
-        p_norm = self.prob.sum(1)
+        p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
         h_p_norm = p_norm.get()
         s = drange[0]
         e = drange[1]
         num_data_b = e - s
-
+        rot_views = cp.zeros((self.num_streams,)+intens[0].shape)
+        mweights = cp.zeros((self.num_streams,)+intens[0].shape)
         intens[:] = 0
+
         for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            self.k_merge_all((self.bsize_data,), (32,),
-                    (self.prob[i], num_data_b,
-                     self.dset.ones[s:e], self.dset.multi[s:e],
-                     self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
-                     self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                     intens[r]))
+
+            mweights[snum,:] = 0
+            for j in range(self.num_rot):
+                rot_views[snum,:] = 0
+                self.k_merge_all((self.bsize_data,), (32,),
+                        (self.prob[i*self.num_rot + j], num_data_b,
+                         self.dset.ones[s:e], self.dset.multi[s:e],
+                         self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
+                         self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                         rot_views[snum]))
+                self.k_slice_merge((self.bsize_model,)*2, (32,)*2,
+                        (rot_views[snum], j*2.*np.pi/self.num_rot, self.size,
+                         intens[r], mweights[snum]))
+            sel = (mweights[snum] > 0)
+            intens[r][sel] /= mweights[snum][sel]
             intens[r] = intens[r] / p_norm[i] - self.dset.bg
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
