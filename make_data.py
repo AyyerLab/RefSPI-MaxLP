@@ -10,8 +10,6 @@ import h5py
 import numpy as np
 import cupy as cp
 
-import kernels
-
 class DataGenerator():
     def __init__(self, config_file):
         config = configparser.ConfigParser()
@@ -27,6 +25,10 @@ class DataGenerator():
 
         if self.fluence not in ['constant', 'gamma']:
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
+        with open('kernels.cu') as f:
+            kernels = cp.RawModule(f.read())
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
+        self.k_slice_gen = kernels.get_function('slice_gen')
         self.object = cp.zeros((self.size, self.size), dtype='f8')
         self.object_sum = 0
         self.bgmask = cp.zeros_like(self.object)
@@ -119,7 +121,9 @@ class DataGenerator():
         ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
         multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
-        shifts = np.random.random((self.num_data, 2))*6 - 3
+        #shifts = np.random.random((self.num_data, 2))*6 - 3
+        shifts = np.random.randn(self.num_data, 2)*1.
+        #shifts = np.zeros((self.num_data, 2))
         fptr['true_shifts'] = shifts
         if self.fluence == 'gamma':
             scale = np.random.gamma(2., 0.5, self.num_data)
@@ -127,20 +131,27 @@ class DataGenerator():
             scale = np.ones(self.num_data, dtype='f8')
         fptr['scale'] = scale
         diameters = np.random.randn(self.num_data)*0.5 + 7.
+        #diameters = np.ones(self.num_data)*7.
         fptr['true_diameters'] = diameters
         #rel_scales = diameters**3 * 1000. / 7**3
         #scale *= rel_scales/1.e3
+        angles = np.random.random(self.num_data) * 2. * np.pi
+        #angles = np.zeros(self.num_data)
 
         view = cp.zeros(self.size**2, dtype='f8')
+        rview = cp.zeros_like(view, dtype='f8')
+        zmask = cp.zeros_like(view, dtype='f8')
         model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
         bsize_model = int(np.ceil(self.size/32.))
         stime = time.time()
         for i in range(self.num_data):
-            kernels.slice_gen_holo((bsize_model,)*2, (32,)*2,
-                (model, shifts[i,0], shifts[i,1], diameters[i], 1000., scale[i], self.size, self.bgmask, 0, view))
+            self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
+                (model, shifts[i,0], shifts[i,1], diameters[i], 1000., scale[i], self.size, zmask, 0, view))
             view *= mask.ravel()
             view *= self.mean_count / view.sum()
-            frame = cp.random.poisson(view, dtype='i4').ravel()
+            self.k_slice_gen((bsize_model,)*2, (32,)*2,
+                (view, angles[i], 1., self.size, self.bgmask, 0, rview))
+            frame = cp.random.poisson(rview, dtype='i4')
             place_ones[i] = cp.where(frame == 1)[0].get()
             place_multi[i] = cp.where(frame > 1)[0].get()
             count_multi[i] = frame[frame > 1].get()
