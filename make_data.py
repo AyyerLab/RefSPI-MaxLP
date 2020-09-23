@@ -20,13 +20,14 @@ class DataGenerator():
         self.fluence = config.get('make_data', 'fluence', fallback='constant')
         self.mean_count = config.getfloat('make_data', 'mean_count')
         self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
+        self.rel_scale = config.getfloat('make_data', 'rel_scale', fallback=1000.)
         self.out_file = os.path.join(os.path.dirname(config_file),
                                      config.get('make_data', 'out_photons_file'))
 
         if self.fluence not in ['constant', 'gamma']:
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
-        with open('kernels.cu') as f:
-            kernels = cp.RawModule(f.read())
+        with open('kernels.cu', 'r') as f:
+            kernels = cp.RawModule(code=f.read())
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         self.k_slice_gen = kernels.get_function('slice_gen')
         self.object = cp.zeros((self.size, self.size), dtype='f8')
@@ -108,6 +109,7 @@ class DataGenerator():
         if 'num_pix' in fptr: del fptr['num_pix']
         if 'true_shifts' in fptr: del fptr['true_shifts']
         if 'true_diameters' in fptr: del fptr['true_diameters']
+        if 'true_angles' in fptr: del fptr['true_angles']
         if 'bg' in fptr: del fptr['bg']
         if 'scale' in fptr: del fptr['scale']
 
@@ -137,6 +139,7 @@ class DataGenerator():
         #scale *= rel_scales/1.e3
         angles = np.random.random(self.num_data) * 2. * np.pi
         #angles = np.zeros(self.num_data)
+        fptr['true_angles'] = angles
 
         view = cp.zeros(self.size**2, dtype='f8')
         rview = cp.zeros_like(view, dtype='f8')
@@ -146,7 +149,7 @@ class DataGenerator():
         stime = time.time()
         for i in range(self.num_data):
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
-                (model, shifts[i,0], shifts[i,1], diameters[i], 1000., scale[i], self.size, zmask, 0, view))
+                (model, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
             view *= mask.ravel()
             view *= self.mean_count / view.sum()
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
