@@ -170,8 +170,7 @@ class EMC():
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
         self.prob = cp.array([])
         with open('kernels.cu', 'r') as f:
-            kernel_code = f.read()
-        kernels = cp.RawModule(kernel_code)
+            kernels = cp.RawModule(code=f.read())
         self.k_slice_gen = kernels.get_function('slice_gen')
         self.k_slice_merge = kernels.get_function('slice_merge')
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
@@ -247,7 +246,7 @@ class EMC():
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_model,)*2, (32,)*2,
-                        (views[snum], j*2.*np.pi/self.num_rot, 1.,
+                        (views[snum], j*np.pi/self.num_rot, 1.,
                          self.size, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
                         (rot_views[snum], self.probmask, num_data_b,
@@ -304,11 +303,15 @@ class EMC():
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                          rot_views[snum]))
                 self.k_slice_merge((self.bsize_model,)*2, (32,)*2,
-                        (rot_views[snum], j*2.*np.pi/self.num_rot, self.size,
+                        (rot_views[snum], j*np.pi/self.num_rot, self.size,
                          intens[r], mweights[snum]))
             sel = (mweights[snum] > 0)
             intens[r][sel] /= mweights[snum][sel]
             intens[r] = intens[r] / p_norm[i] - self.dset.bg
+            # Centrosymmetrization
+            intens2d = intens[r].reshape(185,185)
+            intens2d = 0.5 * (intens2d + intens2d[::-1,::-1])
+            intens[r] = intens2d.ravel()
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
@@ -319,16 +322,16 @@ class EMC():
             sel = (self.rad > self.size//4) & (self.rad < self.size//2)
             mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)
             fobs = cp.sqrt(intens * mscale)
-            #print('mscale =', mscale)
+            print('mscale =', mscale)
 
             iter_curr = cp.empty(intens.shape, dtype='c16')
             iter_curr[:] = dmodel.ravel()
             iter_curr[:,self.invmask] = 0
             iter_p1 = cp.empty_like(iter_curr)
 
-            #for i in range(10):
-            #    iter_curr = self.er(iter_curr, fobs)
-            for i in range(50):
+            for i in range(10):
+                iter_curr = self.er(iter_curr, fobs, iter_p1)
+            for i in range(40):
                 iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
@@ -337,7 +340,11 @@ class EMC():
             self.model = dmodel.get()
             if iternum < 5 or iternum % 5 == 0:
                 amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
-                famodel = ndimage.gaussian_filter(amodel, 3)
+                if iternum <= 5:
+                    sigma = 3
+                else:
+                    sigma = 2
+                famodel = ndimage.gaussian_filter(amodel, sigma)
                 thresh = np.sort(famodel.ravel())[int(0.94*amodel.size)]
                 self.invsuppmask = cp.array(famodel < thresh)
 
@@ -423,9 +430,10 @@ def main():
             cp.cuda.Device(dev).use()
 
     recon = EMC(args.config_file, num_streams=args.streams)
+    logf = open('EMC.log', 'w')
     if rank == 0:
-        print('\nIter  time(s)  change')
-        sys.stdout.flush()
+        logf.write('Iter  time(s)  change\n')
+        logf.flush()
         avgtime = 0.
         numavg = 0
     for i in range(args.num_iter):
@@ -433,15 +441,17 @@ def main():
         stime = time.time()
         recon.run_iteration(i+1)
         etime = time.time()
+        sys.stderr.write('\r%d/%d (%f s)'% (i+1, args.num_iter, etime-stime))
         if rank == 0:
             norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
-            print('%-6d%-.2e %e' % (i+1, etime-stime, norm))
-            sys.stdout.flush()
+            logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
+            logf.flush()
             if i > 0:
                 avgtime += etime-stime
                 numavg += 1
     if rank == 0 and numavg > 0:
-        print('%.4e s/iteration on average' % (avgtime / numavg))
+        print('\n%.4e s/iteration on average' % (avgtime / numavg))
+    logf.close()
 
 if __name__ == '__main__':
     main()
