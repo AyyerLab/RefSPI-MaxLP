@@ -63,6 +63,7 @@ class DataGenerator():
                 if 'solution' in fptr:
                     del fptr['solution']
                 fptr['solution'] = mask.get()
+        return mask
 
     def parse_obj(self, bg=False):
         mask = self.bgmask if bg else self.object
