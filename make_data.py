@@ -20,13 +20,13 @@ class DataGenerator():
         self.fluence = config.get('make_data', 'fluence', fallback='constant')                                 # Intensity for incident beam
         self.mean_count = config.getfloat('make_data', 'mean_count')
         self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
-        self.rel_scale = config.getfloat('make_data', 'rel_scale', fallback=1000.)
+        self.rel_scale = config.getfloat('make_data', 'rel_scale', fallback=1000.)                             # Relative Sphere Scaling
         self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]                    # Mean and STD in diameter of GOLD sphere
         self.shift_sigma = config.getfloat('make_data', 'shift_sigma')                                         # STD in sphere center : GOLD
         self.shift_sigma2 = config.getfloat('make_data', 'shift_sigma2')                                       # STD in sphere center : Protein 2(Wobbling)
 
         self.out_file = os.path.join(os.path.dirname(config_file),
-                config.get('make_data', 'out_photons_file'))                                                   # SAVE : Diffraction Pattern
+                config.get('make_data', 'out_photons_file'))                                                   # SAVE : Diffraction Pattern in holo.h5
 
         if self.fluence not in ['constant', 'gamma']:                                                          # Fluence : Constant or Gamma
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
@@ -82,7 +82,7 @@ class DataGenerator():
             diskrad2 = cp.sqrt((x2 - cen2[0])**2 + (y2- cen2[1])**2)
             mask2[diskrad2 <= rad2] += 1. - (diskrad2[diskrad2 <= rad2] / rad2)**2
 
-        # Sun Object
+        # Sum Object
 
 
         if bg:
@@ -130,7 +130,7 @@ class DataGenerator():
             self.object1 = mask1
             self.object2 = mask2
 
-    def make_data(self, parse=False):                                                                      # Diffraction Patterns
+    def make_data(self, parse=False):                                                                                      # Diffraction Patterns
         if self.object_sum1 == 0.:
             if parse:
                 self.parse_obj()
@@ -149,7 +149,7 @@ class DataGenerator():
             else:
                 self.make_obj(bg=True)
 
-        # Protein 1
+        # Protein 1 (Static)
 
         mask1 = cp.ones(self.object1.shape, dtype='f8')
         x1, y1 = cp.indices(self.object1.shape, dtype='f8')
@@ -158,7 +158,7 @@ class DataGenerator():
         mask1[pixrad1<4] = 0
         mask1[pixrad1>=cen1] = 0
 
-        # Protein 2
+        # Protein 2 (Wobbling)
 
         mask2 = cp.ones(self.object2.shape, dtype='f8')
         x2, y2 = cp.indices(self.object2.shape, dtype='f8')
@@ -178,6 +178,7 @@ class DataGenerator():
 
         if 'true_shifts' in fptr: del fptr['true_shifts']                                       # GOLD Sphere
         if 'true_shifts2' in fptr: del fptr['true_shifts2']                                     # Protein 2
+
         if 'true_diameters' in fptr: del fptr['true_diameters']                                
         if 'true_angles' in fptr: del fptr['true_angles']
         if 'bg' in fptr: del fptr['bg']
@@ -274,8 +275,11 @@ class DataGenerator():
 
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
+
+
             
-            frame = cp.random.poisson(rview, dtype='i4')
+            frame = cp.random.poisson(rview, dtype='i4')                                       # Poisson Noise
+            
             place_ones[i] = cp.where(frame == 1)[0].get()
             place_multi[i] = cp.where(frame > 1)[0].get()
             count_multi[i] = frame[frame > 1].get()

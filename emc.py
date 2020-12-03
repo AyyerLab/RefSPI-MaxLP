@@ -17,7 +17,7 @@ import cupy as cp
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
-class Dataset():
+class Dataset():                                                                                  # Analyze Photon Dataset
     '''Parses sparse photons dataset from HDF5 file
 
     Args:
@@ -29,12 +29,13 @@ class Dataset():
         Dataset object with attributes containing photon locations
     '''
     def __init__(self, photons_file, num_pix, need_scaling=False):
-        self.powder = None
+        self.powder = None                                                                        # Powder : Diffraction Patterns
         mpool = cp.get_default_memory_pool()
         init_mem = mpool.used_bytes()
         self.photons_file = photons_file
         self.num_pix = num_pix
 
+                                                                                                  # Read photon data
         with h5py.File(self.photons_file, 'r') as fptr:
             if self.num_pix != fptr['num_pix'][...]:
                 raise AttributeError('Number of pixels in photons file does not match')
@@ -61,6 +62,8 @@ class Dataset():
             self.mean_count = float((self.place_ones.shape[0] +
                                      self.count_multi.sum()
                                     ) / self.num_data)
+
+                                                                                                                      # Scaling
             if need_scaling:
                 self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum()
                                                     for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
@@ -73,7 +76,8 @@ class Dataset():
                 self.bg = cp.zeros(self.num_pix)
         self.mem = mpool.used_bytes() - init_mem
 
-    def get_powder(self):
+
+    def get_powder(self):                                                                                            # Diffraction Patterns 
         if self.powder is not None:
             return self.powder
 
@@ -84,7 +88,7 @@ class Dataset():
         self.powder = cp.array(self.powder)
         return self.powder
 
-class EMC():
+class EMC():                                                                                                         # EMC : Reconstruction
     '''Reconstructor object using parameters from config file
 
     Args:
@@ -94,51 +98,60 @@ class EMC():
     Can be used with mpirun, in which case work will be divided among ranks.
     '''
     def __init__(self, config_file, num_streams=4):
+
+                                                                                                                      # RUN : Devices
         self.num_streams = num_streams
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.rank
         self.num_proc = self.comm.size
         self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
+                                                                                                                      # Read Config File 
         config = configparser.ConfigParser()
         config.read(config_file)
 
-        self.size = config.getint('parameters', 'size')
+        self.size = config.getint('parameters', 'size')                                                               # Image Size
+        self.support = config.getfloat('emc', 'support')                                                              # Support
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
-        self.num_rot = config.getint('emc', 'num_rot')
+        self.num_rot = config.getint('emc', 'num_rot')                                                                # Orientation
         self.photons_file = os.path.join(os.path.dirname(config_file),
-                                         config.get('emc', 'in_photons_file'))
+                                         config.get('emc', 'in_photons_file'))                                        # Diffraction Pattern in holo.h5
         self.output_folder = os.path.join(os.path.dirname(config_file),
-                                          config.get('emc', 'output_folder', fallback='data/'))
+                config.get('emc', 'output_folder', fallback='data/wp_std2/'))                                         # SAVE : Folder
         self.log_file = os.path.join(os.path.dirname(config_file),
-                                     config.get('emc', 'log_file', fallback='EMC.log'))
+                config.get('emc', 'log_file', fallback='EMC2.log'))                                                   # SAVE : EMC.log
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
-        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
-        sx = (float(s) for s in config.get('emc', 'shiftx').split())
-        sy = (float(s) for s in config.get('emc', 'shifty').split())
+        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])                                      # GOLD Sphere diameter
+        sx = (float(s) for s in config.get('emc', 'shiftx').split())                                                  # Shift for center of GOLD sphere along X
+        sy = (float(s) for s in config.get('emc', 'shifty').split())                                                  # Shift for center of GOLD sphere along Y
         self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(*sx), np.linspace(*sy), np.linspace(*dia), indexing='ij')
+
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
         self.num_states = len(self.shiftx)
-        print(self.num_states, 'sampled states')
+        print(self.num_states, 'sampled states')                                                                      # Sampled States
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
+
+                                                                                                                      # MASK
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
-        self.invsuppmask[66:119,66:119] = False
+        self.invsuppmask[47:119,47:119] = False                                                                       # Size of invsuppmask
+
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states)]
-        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
+
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states)]                             # Ramp * GOLD sphere
+        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)                             # GOLD sphere intensity [Fourier]
 
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
@@ -149,11 +162,13 @@ class EMC():
                     (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
         self.model = np.empty((self.size**2,), dtype='c16')
+
         if self.rank == 0:
-            # Random model
+
+                                                                                                                       # Random model
             rmodel = np.random.random((self.size,)*2)
             rmodel[self.invsuppmask.get()] = 0
-            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
+            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                              # Fourier Transforms
             self.model /= 2e3
 
             # Solution as init
@@ -162,27 +177,30 @@ class EMC():
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
             self.model[self.invmask.get()] = 0
-            np.save('data/model_000.npy', self.model)
+            np.save('data/wp_std2/model_000.npy', self.model)                                                          # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
-        if self.need_scaling:
+
+        if self.need_scaling:                                                                                          # Scaling 
             self.scales = self.dset.counts / self.dset.mean_count
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
         self.prob = cp.array([])
-        with open('kernels.cu', 'r') as f:
+
+
+        with open('kernels.cu', 'r') as f:                                                                              # Kernels.cu
             kernels = cp.RawModule(code=f.read())
         self.k_slice_gen = kernels.get_function('slice_gen')
         self.k_slice_merge = kernels.get_function('slice_merge')
-        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
-        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')                                                  # GOLD sphere 
+        self.k_calc_prob_all = kernels.get_function('calc_prob_all')                                                    # Probability
         self.k_merge_all = kernels.get_function('merge_all')
-        self.k_proj_divide = kernels.get_function('proj_divide')
+        self.k_proj_divide = kernels.get_function('proj_divide')                                                        # Project & Divide
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
 
-    def run_iteration(self, iternum=None):
+    def run_iteration(self, iternum=None):                                                                              # RUN : EMC
         '''Run one iterations of EMC algorithm
 
         Args:
@@ -215,7 +233,7 @@ class EMC():
             b_start += b
         self._normalize_model(intens, dmodel, iternum)
 
-    def _calculate_prob(self, dmodel, views, drange):
+    def _calculate_prob(self, dmodel, views, drange):                                                    # Calculate Probability
         s = drange[0]
         e = drange[1]
         num_data_b = e - s
@@ -230,7 +248,7 @@ class EMC():
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
-                     1., self.size, self.dset.bg, 0, views[snum]))
+                     1., self.size, self.dset.bg, 0, views[snum]))                                         # GOLD Sphere
             msums[i] = views[snum][selmask].sum()
             sum_views[snum] += views[snum]
         [s.synchronize() for s in self.stream_list]
@@ -242,7 +260,7 @@ class EMC():
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
-                     1., self.size, self.dset.bg, 0, views[snum]))
+                     1., self.size, self.dset.bg, 0, views[snum]))                                         # Gold Sphere
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_model,)*2, (32,)*2,
@@ -253,7 +271,7 @@ class EMC():
                          self.dset.ones[s:e], self.dset.multi[s:e],
                          self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))
+                         -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))          # Calculate Probability
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
@@ -275,9 +293,9 @@ class EMC():
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         #self.prob.clip(a_min=P_MIN, out=self.prob)
-        np.save('data/prob.npy', self.prob.get())
+        np.save('data/wp_std2/prob.npy', self.prob.get())                                                              # SAVE : Probability
 
-    def _update_model(self, intens, dmodel, drange):
+    def _update_model(self, intens, dmodel, drange):                                                                   # UPDATE : Model                       
         p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
         h_p_norm = p_norm.get()
         s = drange[0]
@@ -301,10 +319,10 @@ class EMC():
                          self.dset.ones[s:e], self.dset.multi[s:e],
                          self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         rot_views[snum]))
+                         rot_views[snum]))                                                                              # Merge
                 self.k_slice_merge((self.bsize_model,)*2, (32,)*2,
                         (rot_views[snum], j*np.pi/self.num_rot, self.size,
-                         intens[r], mweights[snum]))
+                         intens[r], mweights[snum]))                                                                    # Merge
             sel = (mweights[snum] > 0)
             intens[r][sel] /= mweights[snum][sel]
             intens[r] = intens[r] / p_norm[i] - self.dset.bg
@@ -315,12 +333,12 @@ class EMC():
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
-    def _normalize_model(self, intens, dmodel, iternum):
+    def _normalize_model(self, intens, dmodel, iternum):                                                                             # Normalize Model
         self.comm.Allreduce(MPI.IN_PLACE, [intens.get(), MPI.DOUBLE], op=MPI.SUM)
 
         if self.rank == 0:
             sel = (self.rad > self.size//4) & (self.rad < self.size//2)
-            mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)
+            mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)            # Intensity : GOLD Sphere
             fobs = cp.sqrt(intens * mscale)
             print('mscale =', mscale)
 
@@ -337,31 +355,31 @@ class EMC():
             #    iter_curr = self.er(iter_curr, fobs)
             dmodel = self.proj_concur(iter_curr)[0]
 
-            self.model = dmodel.get()
-            if iternum < 5 or iternum % 5 == 0:
+            self.model = dmodel.get()                      
+            if iternum < 5 or iternum % 5 == 0:                                                                                        # SUPPORT Update
                 amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
                 if iternum <= 5:
                     sigma = 3
                 else:
                     sigma = 2
-                famodel = ndimage.gaussian_filter(amodel, sigma)
-                thresh = np.sort(famodel.ravel())[int(0.94*amodel.size)]
+                famodel = ndimage.gaussian_filter(amodel, sigma)                                                                        # Gaussian
+                thresh = np.sort(famodel.ravel())[int(self.support*amodel.size)]                                                        # Support area
                 self.invsuppmask = cp.array(famodel < thresh)
 
             if iternum is None:
-                np.save('data/model.npy', self.model)
+                np.save('data/wp_std2/model.npy', self.model)                                                                                  # SAVE
             else:
-                np.save('data/model_%.3d.npy'%iternum, self.model)
-                np.save('data/intens_%.3d.npy'%iternum, intens.get())
-                np.save('data/rmax_%.3d.npy'%iternum, self.rmax)
-                np.save('data/invsupp_%.3d.npy'%iternum, self.invsuppmask)
+                np.save('data/wp_std2/model_%.3d.npy'%iternum, self.model)                                                                     # SAVE : Model
+                np.save('data/wp_std2/intens_%.3d.npy'%iternum, intens.get())                                                                  # SAVE : Intensity
+                np.save('data/wp_std2/rmax_%.3d.npy'%iternum, self.rmax)                                                                       # SAVE : Orientation
+                np.save('data/wp_std2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                                                             # SAVE : invsuppmask
             self.model[self.invmask.get()] = 0
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
-    def ramp(self, n):
-        return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
+    def ramp(self, n):                                                                                                                # Phase Ramp : GOLD Sphere
+        return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)         
 
-    def sphere(self, n, diameter=None):
+    def sphere(self, n, diameter=None):                                                                                               # Gold Sphere
         if n is None:
             dia = diameter
         else:
@@ -370,7 +388,7 @@ class EMC():
         s[s==0] = 1.e-5
         return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
 
-    def proj_divide(self, iter_in, data, iter_out):
+    def proj_divide(self, iter_in, data, iter_out):                                                                                   # Project and Divide
         for n in range(self.num_states):
             snum = n % self.num_streams
             self.stream_list[snum].use()
@@ -381,7 +399,7 @@ class EMC():
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
-    def proj_concur(self, iter_in, supp=True):
+    def proj_concur(self, iter_in, supp=True):                                                                                         # Project and Concurr
         iter_out = cp.empty_like(iter_in)
         avg = iter_in.mean(0)
         if supp:
@@ -391,7 +409,7 @@ class EMC():
         iter_out[:] = avg
         return iter_out
 
-    def diffmap(self, iterate, fobs, p1):
+    def diffmap(self, iterate, fobs, p1):                                                                                               # Difference Map
         self.proj_divide(iterate, fobs, p1)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
 
@@ -430,7 +448,7 @@ def main():
             cp.cuda.Device(dev).use()
 
     recon = EMC(args.config_file, num_streams=args.streams)
-    logf = open('EMC.log', 'w')
+    logf = open('EMC2.log', 'w')                                                                       # WRITE and SAVE : Log file
     if rank == 0:
         logf.write('Iter  time(s)  change\n')
         logf.flush()
