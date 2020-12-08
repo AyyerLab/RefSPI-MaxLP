@@ -253,24 +253,24 @@ class DataGenerator():
         stime = time.time()
 
 
-        # diffraction Patterns 
+        # Diffraction Patterns 
 
         for i in range(self.num_data):
 
             # Composite Object
 
             model = model1 + model2 * cp.exp(2* cp.pi * 1j * ((qx2 * shifts2[i,0] + qy2 * shifts2[i,1])))      
-            if i < 5:
+            if i < 10:
                 real_object = cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model)))
                 real_object = abs(real_object)
-                np.save('data/wp_std2/real_object_%.3d.npy'%i, real_object)
+                np.save('data/wp_std0/real_object_%.3d.npy'%i, real_object)
             
 
-            # Add Reference
+            # Add GOLD Reference [Fourier Space]
 
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (model, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
-            view *= mask1.ravel() + mask2.ravel()  
+            view *= (mask1.ravel() + mask2.ravel()) 
             view *= self.mean_count / view.sum()
 
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
@@ -285,7 +285,9 @@ class DataGenerator():
             count_multi[i] = frame[frame > 1].get()
             ones[i] = place_ones[i].shape[0]
             multi[i] = place_multi[i].shape[0]
-            sys.stderr.write('\rWritten %d/%d frames (%d)  ' % (i+1, self.num_data, int(frame.sum())))
+            sys.stderr.write('\rWritten %d/%d frames (%d)' % (i+1, self.num_data, int(frame.sum())))
+
+
         etime = time.time()
         sys.stderr.write('\nTime taken (make_data): %f s\n' % (etime-stime))
         fptr.close()

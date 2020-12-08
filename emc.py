@@ -17,6 +17,7 @@ import cupy as cp
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
+
 class Dataset():                                                                                  # Analyze Photon Dataset
     '''Parses sparse photons dataset from HDF5 file
 
@@ -111,22 +112,27 @@ class EMC():                                                                    
         config.read(config_file)
 
         self.size = config.getint('parameters', 'size')                                                               # Image Size
-        self.support = config.getfloat('emc', 'support')                                                              # Support
+
+        self.support_area = config.getfloat('emc', 'support_area')                                                  # Support area 
+
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')                                                                # Orientation
         self.photons_file = os.path.join(os.path.dirname(config_file),
                                          config.get('emc', 'in_photons_file'))                                        # Diffraction Pattern in holo.h5
+       # self.start_model = os.path.join(os.path.dirname(config_file), 
+          #      config.get('emc', 'start_model_file'))                                                               # Load model from last iteration
+
         self.output_folder = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'output_folder', fallback='data/wp_std2/'))                                         # SAVE : Folder
+                config.get('emc', 'output_folder'))                                                                   # SAVE : Folder
         self.log_file = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'log_file', fallback='EMC2.log'))                                                   # SAVE : EMC.log
+                config.get('emc', 'log_file'))                                                                        # SAVE : EMC.log
+
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])                                      # GOLD Sphere diameter
         sx = (float(s) for s in config.get('emc', 'shiftx').split())                                                  # Shift for center of GOLD sphere along X
         sy = (float(s) for s in config.get('emc', 'shifty').split())                                                  # Shift for center of GOLD sphere along Y
         self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(*sx), np.linspace(*sy), np.linspace(*dia), indexing='ij')
-
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
@@ -137,13 +143,16 @@ class EMC():                                                                    
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
 
-                                                                                                                      # MASK
+                                                                                                                      # MASK : Protein 1 (Static)
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
+
+        # Two -Square
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
-        self.invsuppmask[47:119,47:119] = False                                                                       # Size of invsuppmask
+        self.invsuppmask[66:119,66:119]  = False                                                                       # Protein 1 : Static
+        self.invsuppmask[47:65, 47:65]  = False                                                                        # Protein 2  : Wobble
 
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
@@ -165,10 +174,10 @@ class EMC():                                                                    
 
         if self.rank == 0:
 
-                                                                                                                       # Random model
+                                                                                                                       # Random model 
             rmodel = np.random.random((self.size,)*2)
-            rmodel[self.invsuppmask.get()] = 0
-            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                              # Fourier Transforms
+            rmodel[self.invsuppmask.get()] = 0                                                                        # InvSupp 
+            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                             # Fourier Transforms
             self.model /= 2e3
 
             # Solution as init
@@ -176,8 +185,8 @@ class EMC():                                                                    
             #    sol = f['solution'][:]
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
-            self.model[self.invmask.get()] = 0
-            np.save('data/wp_std2/model_000.npy', self.model)                                                          # SAVE: Model
+            self.model[self.invmask.get()] = 0                                                                        # Invmask
+            np.save('data/wp_std0/model_000.npy', self.model)                                                          # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
         if self.need_scaling:                                                                                          # Scaling 
@@ -344,7 +353,7 @@ class EMC():                                                                    
 
             iter_curr = cp.empty(intens.shape, dtype='c16')
             iter_curr[:] = dmodel.ravel()
-            iter_curr[:,self.invmask] = 0
+            iter_curr[:,self.invmask] = 0                                                                            # invmask
             iter_p1 = cp.empty_like(iter_curr)
 
             for i in range(10):
@@ -356,23 +365,24 @@ class EMC():                                                                    
             dmodel = self.proj_concur(iter_curr)[0]
 
             self.model = dmodel.get()                      
-            if iternum < 5 or iternum % 5 == 0:                                                                                        # SUPPORT Update
+            if iternum < 1 or iternum % 1 == 0:                                                                                        # SUPPORT Update
                 amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
-                if iternum <= 5:
+                if iternum <= 1:
                     sigma = 3
                 else:
                     sigma = 2
                 famodel = ndimage.gaussian_filter(amodel, sigma)                                                                        # Gaussian
-                thresh = np.sort(famodel.ravel())[int(self.support*amodel.size)]                                                        # Support area
-                self.invsuppmask = cp.array(famodel < thresh)
+                thresh = np.sort(famodel.ravel())[int((1 - self.support_area)*amodel.size)]                        # Support area : Protein 1 (Static)
+
+                self.invsuppmask = cp.array(famodel < thresh)                                                      # invsuppmask
 
             if iternum is None:
-                np.save('data/wp_std2/model.npy', self.model)                                                                                  # SAVE
+                np.save('data/wp_std0/model.npy', self.model)                                                                 # SAVE
             else:
-                np.save('data/wp_std2/model_%.3d.npy'%iternum, self.model)                                                                     # SAVE : Model
-                np.save('data/wp_std2/intens_%.3d.npy'%iternum, intens.get())                                                                  # SAVE : Intensity
-                np.save('data/wp_std2/rmax_%.3d.npy'%iternum, self.rmax)                                                                       # SAVE : Orientation
-                np.save('data/wp_std2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                                                             # SAVE : invsuppmask
+                np.save('data/wp_std0/model_%.3d.npy'%iternum, self.model)                                                 # SAVE : Model
+                np.save('data/wp_std0/intens_%.3d.npy'%iternum, intens.get())                                              # SAVE : Intensity
+                np.save('data/wp_std0/rmax_%.3d.npy'%iternum, self.rmax)                                                   # SAVE : Orientation
+                np.save('data/wp_std0/invsupp_%.3d.npy'%iternum, self.invsuppmask)                                         # SAVE : invsuppmask
             self.model[self.invmask.get()] = 0
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
@@ -395,7 +405,7 @@ class EMC():                                                                    
 
             self.k_proj_divide((self.size*self.size//32 + 1,), (32,),
                                 (iter_in[n], data[n], self.sphere_ramps[n],
-                                 self.intinvmask, self.size, iter_out[n]))
+                                 (self.intinvmask), self.size, iter_out[n]))                           # invmask
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
@@ -404,7 +414,7 @@ class EMC():                                                                    
         avg = iter_in.mean(0)
         if supp:
             favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
-            favg[self.invsuppmask] = 0
+            favg[self.invsuppmask] = 0                                                                # invsuppmask
             avg = cp.fft.fftn(cp.fft.ifftshift(favg)).ravel()
         iter_out[:] = avg
         return iter_out
@@ -412,6 +422,10 @@ class EMC():                                                                    
     def diffmap(self, iterate, fobs, p1):                                                                                               # Difference Map
         self.proj_divide(iterate, fobs, p1)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
+
+    def diffmap2(self, iterate, fobs, p1):                               # beta = -1
+        self.proj_concur(iterate, fobs, p1)
+        return iterate + self.proj_divide(2. * p1 - iterate) - p1
 
     def er(self, iterate, fobs, p1):
         self.proj_divide(iterate, fobs, p1)
@@ -448,7 +462,7 @@ def main():
             cp.cuda.Device(dev).use()
 
     recon = EMC(args.config_file, num_streams=args.streams)
-    logf = open('EMC2.log', 'w')                                                                       # WRITE and SAVE : Log file
+    logf = open('EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
     if rank == 0:
         logf.write('Iter  time(s)  change\n')
         logf.flush()
@@ -463,6 +477,7 @@ def main():
         if rank == 0:
             norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
             logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
+            print('Change from last iteration: ', norm)
             logf.flush()
             if i > 0:
                 avgtime += etime-stime
