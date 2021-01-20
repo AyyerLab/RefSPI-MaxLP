@@ -13,12 +13,13 @@ from scipy import ndimage
 import h5py
 from mpi4py import MPI
 import cupy as cp
+from scipy import special
 
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
 
-class Dataset():                                                                                  # Analyze Photon Dataset
+class Dataset():                                                                                  # Dataset
     '''Parses sparse photons dataset from HDF5 file
 
     Args:
@@ -30,7 +31,7 @@ class Dataset():                                                                
         Dataset object with attributes containing photon locations
     '''
     def __init__(self, photons_file, num_pix, need_scaling=False):
-        self.powder = None                                                                        # Powder : Diffraction Patterns
+        self.powder = None                                              
         mpool = cp.get_default_memory_pool()
         init_mem = mpool.used_bytes()
         self.photons_file = photons_file
@@ -64,7 +65,7 @@ class Dataset():                                                                
                                      self.count_multi.sum()
                                     ) / self.num_data)
 
-                                                                                                                      # Scaling
+                                                                                                 # Scaling
             if need_scaling:
                 self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum()
                                                     for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
@@ -78,7 +79,7 @@ class Dataset():                                                                
         self.mem = mpool.used_bytes() - init_mem
 
 
-    def get_powder(self):                                                                                            # Diffraction Patterns 
+    def get_powder(self):                                                                        # Diffraction Patterns 
         if self.powder is not None:
             return self.powder
 
@@ -89,7 +90,7 @@ class Dataset():                                                                
         self.powder = cp.array(self.powder)
         return self.powder
 
-class EMC():                                                                                                         # EMC : Reconstruction
+class EMC():                                                                                    # EMC : Reconstruction
     '''Reconstructor object using parameters from config file
 
     Args:
@@ -100,32 +101,50 @@ class EMC():                                                                    
     '''
     def __init__(self, config_file, num_streams=4):
 
-                                                                                                                      # RUN : Devices
+                                                                                                # RUN : Devices
         self.num_streams = num_streams
         self.comm = MPI.COMM_WORLD
         self.rank = self.comm.rank
         self.num_proc = self.comm.size
         self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
-                                                                                                                      # Read Config File 
+                                                                                                # Read Config File 
         config = configparser.ConfigParser()
         config.read(config_file)
 
-        self.size = config.getint('parameters', 'size')                                                               # Image Size
+        self.size = config.getint('parameters', 'size')                                          # Image Size + Zero Padding
 
-        self.support_area = config.getfloat('emc', 'support_area')                                                  # Support area 
+        self.support_area = config.getfloat('emc', 'support_area')                              # Support area 
 
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
-        self.num_rot = config.getint('emc', 'num_rot')                                                                # Orientation
+        self.num_rot = config.getint('emc', 'num_rot')                                          # Orientation
+
+        self.shrinkwrap = config.getint('emc', 'shrinkwrap')                                    # Use Shrink Wrap : Yes/No
+        self.shrink_sigma = config.getint('emc', 'shrink_sigma')                                # Shrink Sigma with iteration : Yes/No
+        self.shrink_support_area = config.getint('emc', 'shrink_support_area')                  # Shrink Support Area with iteration : Yes/No
+
+        self.one_square_support = config.getint('emc', 'one_square_support')                    # Use One-Sqauare Support
+        self.two_square_support = config.getint('emc', 'two_square_support')                    # Use Two-square Support
+        self.true_support = config.getint('emc', 'true_support')                                # Use Composite Object for Support
+        self.true_solution = config.getint('emc', 'true_solution')                              # Use Composite object as true solution (initial model for EMC)
+
+
+
         self.photons_file = os.path.join(os.path.dirname(config_file),
-                                         config.get('emc', 'in_photons_file'))                                        # Diffraction Pattern in holo.h5
-       # self.start_model = os.path.join(os.path.dirname(config_file), 
-          #      config.get('emc', 'start_model_file'))                                                               # Load model from last iteration
+                                         config.get('emc', 'in_photons_file'))                  # Diffraction Pattern in holo.h5
 
         self.output_folder = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'output_folder'))                                                                   # SAVE : Folder
+                config.get('emc', 'output_folder', fallback = 'data/static/separation/touch/exp2/'))      # SAVE : Folder
+
         self.log_file = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'log_file'))                                                                        # SAVE : EMC.log
+                config.get('emc', 'log_file', fallback = 'data/static/separation/touch/exp2/EMC.log'))    # SAVE : EMC.log
+
+        self.true_support_file = os.path.join(os.path.dirname(config_file),
+                                              config.get('emc', 'true_support_file'))               # Get composite object file for Support
+
+        self.true_solution_file = os.path.join(os.path.dirname(config_file),
+                config.get('emc', 'true_solution_file'))                                            # Get composite object file as True Solution to initialize EMC
+         
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
@@ -143,18 +162,30 @@ class EMC():                                                                    
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
 
-                                                                                                                      # MASK : Protein 1 (Static)
+                                                                                                                   # Inverse Mask
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
-        # Two -Square
+        # Inverse Mask Supports
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
-        self.invsuppmask[66:119,66:119]  = False                                                                       # Protein 1 : Static
-        self.invsuppmask[47:65, 47:65]  = False                                                                        # Protein 2  : Wobble
 
-        self.probmask = cp.zeros(self.size**2, dtype='i4')
+        # Composite Object as Support
+        if self.true_support == 1:
+            composite_object = cp.load(self.true_support_file)
+            self.invsuppmask = self.invsuppmask > composite_object
+
+        # One-Square Support
+        if self.one_square_support == 1:
+            self.invsuppmask[88:201,88:201]  = False
+
+        # Two-Square Support
+        if self.two_square_support == 1:
+            self.invsuppmask[65:120,65,120]  = False
+            self.invsuppmask[40:70,40:70]  = False                                                                                                                                            
+
+        self.probmask = cp.zeros(self.size**2, dtype='i4')                                                             # Prob Mask
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
@@ -163,21 +194,28 @@ class EMC():                                                                    
         self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)                             # GOLD sphere intensity [Fourier]
 
         stime = time.time()
-        self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
+
+        self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)                                       # Dataset class
         self.powder = self.dset.get_powder()
+
         etime = time.time()
+
         if self.rank == 0:
             print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
                     (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
         self.model = np.empty((self.size**2,), dtype='c16')
 
-        if self.rank == 0:
+        if self.rank == 0:                                                                                          
+            if self.true_solution == 1:
+                true_model = np.load(self.true_solution_file)                                                             # Composite object as true Solution for starting model
+                true_model[self.invsuppmask.get()] = 0
+                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
+            else:
+                rmodel = np.random.random((self.size,)*2)
+                rmodel[self.invsuppmask.get()] = 0                                                                   # Inverse Support Mask
+                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                             # Real to fourier Space
 
-                                                                                                                       # Random model 
-            rmodel = np.random.random((self.size,)*2)
-            rmodel[self.invsuppmask.get()] = 0                                                                        # InvSupp 
-            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                             # Fourier Transforms
             self.model /= 2e3
 
             # Solution as init
@@ -185,8 +223,8 @@ class EMC():                                                                    
             #    sol = f['solution'][:]
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
-            self.model[self.invmask.get()] = 0                                                                        # Invmask
-            np.save('data/wp_std0/model_000.npy', self.model)                                                          # SAVE: Model
+            self.model[self.invmask.get()] = 0                                                                        # Inverse mask
+            np.save('data/static/separation/touch/exp2/model_000.npy', self.model)                                    # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
         if self.need_scaling:                                                                                          # Scaling 
@@ -227,20 +265,21 @@ class EMC():                                                                    
 
         if self.prob.shape != (self.num_states_p*self.num_rot, block_sizes.max()):
             self.prob = cp.empty((self.num_states_p*self.num_rot, block_sizes.max()), dtype='f8')
-        views = cp.empty((self.num_streams, self.size**2), dtype='f8')
-        intens = cp.empty((self.num_states, self.size**2), dtype='f8')
-        dmodel = cp.array(self.model.ravel())
+        views = cp.empty((self.num_streams, self.size**2), dtype='f8')                                  # Views
+        intens = cp.empty((self.num_states, self.size**2), dtype='f8')                                  # Intens
+        dmodel = cp.array(self.model.ravel())                                                           # dmodel
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
+        # EMC Iteration Steps
         b_start = 0
         for b in block_sizes:
             drange = (b_start, b_start + b)
-            self._calculate_prob(dmodel, views, drange)
-            self._normalize_prob()
-            self._update_model(intens, dmodel, drange)
+            self._calculate_prob(dmodel, views, drange)   # Calculate probability
+            self._normalize_prob()                        # Normalize probability
+            self._update_model(intens, dmodel, drange)    # Update Model
             b_start += b
-        self._normalize_model(intens, dmodel, iternum)
+        self._normalize_model(intens, dmodel, iternum)    # Normalize Model 
 
     def _calculate_prob(self, dmodel, views, drange):                                                    # Calculate Probability
         s = drange[0]
@@ -269,7 +308,7 @@ class EMC():                                                                    
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r], self.sphere_dia[r], 1.,
-                     1., self.size, self.dset.bg, 0, views[snum]))                                         # Gold Sphere
+                     1., self.size, self.dset.bg, 0, views[snum]))                                         # GOLD Sphere
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_model,)*2, (32,)*2,
@@ -302,9 +341,9 @@ class EMC():                                                                    
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         #self.prob.clip(a_min=P_MIN, out=self.prob)
-        np.save('data/wp_std2/prob.npy', self.prob.get())                                                              # SAVE : Probability
+        np.save('data/static/separation/touch/exp2/prob.npy', self.prob.get())                                 # SAVE : Probability
 
-    def _update_model(self, intens, dmodel, drange):                                                                   # UPDATE : Model                       
+    def _update_model(self, intens, dmodel, drange):                                                        # UPDATE : Model                       
         p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
         h_p_norm = p_norm.get()
         s = drange[0]
@@ -336,60 +375,81 @@ class EMC():                                                                    
             intens[r][sel] /= mweights[snum][sel]
             intens[r] = intens[r] / p_norm[i] - self.dset.bg
             # Centrosymmetrization
-            intens2d = intens[r].reshape(185,185)
+            intens2d = intens[r].reshape(385,385)
             intens2d = 0.5 * (intens2d + intens2d[::-1,::-1])
             intens[r] = intens2d.ravel()
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
-    def _normalize_model(self, intens, dmodel, iternum):                                                                             # Normalize Model
+    def _normalize_model(self, intens, dmodel, iternum):                                                             # Normalize Model
         self.comm.Allreduce(MPI.IN_PLACE, [intens.get(), MPI.DOUBLE], op=MPI.SUM)
 
         if self.rank == 0:
             sel = (self.rad > self.size//4) & (self.rad < self.size//2)
-            mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)            # Intensity : GOLD Sphere
+            mscale = float(cp.dot(self.sphere_intens[sel], intens.mean(0)[sel]) / cp.linalg.norm(intens.mean(0)[sel])**2)    # Intensity : GOLD Sphere
             fobs = cp.sqrt(intens * mscale)
             print('mscale =', mscale)
 
             iter_curr = cp.empty(intens.shape, dtype='c16')
             iter_curr[:] = dmodel.ravel()
-            iter_curr[:,self.invmask] = 0                                                                            # invmask
+            iter_curr[:,self.invmask] = 0                                                                                 # Inverse Mask
             iter_p1 = cp.empty_like(iter_curr)
+            
 
-            for i in range(10):
-                iter_curr = self.er(iter_curr, fobs, iter_p1)
-            for i in range(40):
-                iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
+            # Iterations of Divide and Concur
+
+            for i in range(20):
+                iter_curr = self.er(iter_curr, fobs, iter_p1)                                                             # er
+            for i in range(100):
+                iter_curr = self.diffmap(iter_curr, fobs, iter_p1)                                                        # Difference Map
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
-            dmodel = self.proj_concur(iter_curr)[0]
 
-            self.model = dmodel.get()                      
-            if iternum < 1 or iternum % 1 == 0:                                                                                        # SUPPORT Update
-                amodel = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
-                if iternum <= 1:
-                    sigma = 3
-                else:
-                    sigma = 2
-                famodel = ndimage.gaussian_filter(amodel, sigma)                                                                        # Gaussian
-                thresh = np.sort(famodel.ravel())[int((1 - self.support_area)*amodel.size)]                        # Support area : Protein 1 (Static)
 
-                self.invsuppmask = cp.array(famodel < thresh)                                                      # invsuppmask
+            dmodel = self.proj_concur(iter_curr)[0]                                                                       # Project and Concurr
+            self.model = dmodel.get()     
+
+
+            # SHRINK WRAP
+            if self.shrinkwrap == 1:
+                if iternum < 2 or iternum % 2 == 0:                             
+                    amodel =np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))       # OBJECT
+
+                    # SHRINK SIGMA
+                    if self.shrink_sigma == 1:
+                        sig = (iternum - 1)/99
+                        sigma = 10*special.erfc(sig)
+                    else:
+                        if iternum <= 2:
+                            sigma = 3
+                        else:
+                            #sig = 3
+                            sigma = 2 #sig - (iternum*sig)/ 100
+
+                    
+                    famodel = ndimage.gaussian_filter(amodel, sigma)                                                   # Gaussian Convolved over Object
+
+                    # SHRINK SUPOORT AREA
+                    if self.shrink_support_area == 0:
+                        thresh = np.sort(famodel.ravel())[int((1 - self.support_area)*amodel.size)]                    # Support area : Thresholding
+
+                    self.invsuppmask = cp.array(famodel < thresh)                                                      # Inverse Support : Threshold
 
             if iternum is None:
-                np.save('data/wp_std0/model.npy', self.model)                                                                 # SAVE
+                np.save('data/static/separation/touch/exp2/model.npy', self.model)                                        # SAVE
             else:
-                np.save('data/wp_std0/model_%.3d.npy'%iternum, self.model)                                                 # SAVE : Model
-                np.save('data/wp_std0/intens_%.3d.npy'%iternum, intens.get())                                              # SAVE : Intensity
-                np.save('data/wp_std0/rmax_%.3d.npy'%iternum, self.rmax)                                                   # SAVE : Orientation
-                np.save('data/wp_std0/invsupp_%.3d.npy'%iternum, self.invsuppmask)                                         # SAVE : invsuppmask
-            self.model[self.invmask.get()] = 0
+                np.save('data/static/separation/touch/exp2/model_%.3d.npy'%iternum, self.model)                           # SAVE : Model
+                np.save('data/static/separation/touch/exp2/intens_%.3d.npy'%iternum, intens.get())                        # SAVE : Intensity
+                np.save('data/static/separation/touch/exp2/rmax_%.3d.npy'%iternum, self.rmax)                             # SAVE : Orientation
+                np.save('data/static/separation/touch/exp2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                   # SAVE : Invsuppmask
+
+            self.model[self.invmask.get()] = 0                                                                      # Inverse Mask
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
-    def ramp(self, n):                                                                                                                # Phase Ramp : GOLD Sphere
+    def ramp(self, n):                                                                                              # Phase Ramp : GOLD Sphere
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)         
 
-    def sphere(self, n, diameter=None):                                                                                               # Gold Sphere
+    def sphere(self, n, diameter=None):                                                                             # Gold Sphere
         if n is None:
             dia = diameter
         else:
@@ -398,34 +458,35 @@ class EMC():                                                                    
         s[s==0] = 1.e-5
         return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
 
-    def proj_divide(self, iter_in, data, iter_out):                                                                                   # Project and Divide
+    # DIVIDE AND CONCUR
+
+    def proj_divide(self, iter_in, data, iter_out):                                                                 # Project and Divide
         for n in range(self.num_states):
             snum = n % self.num_streams
             self.stream_list[snum].use()
 
             self.k_proj_divide((self.size*self.size//32 + 1,), (32,),
                                 (iter_in[n], data[n], self.sphere_ramps[n],
-                                 (self.intinvmask), self.size, iter_out[n]))                           # invmask
+                                 (self.intinvmask), self.size, iter_out[n]))                                        # Inverse Mask
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
 
-    def proj_concur(self, iter_in, supp=True):                                                                                         # Project and Concurr
+    def proj_concur(self, iter_in, supp=True):                                                                      # Project and Concurr
         iter_out = cp.empty_like(iter_in)
         avg = iter_in.mean(0)
         if supp:
             favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
-            favg[self.invsuppmask] = 0                                                                # invsuppmask
+            favg[self.invsuppmask] = 0                                                                              # Inverse Support Mask
             avg = cp.fft.fftn(cp.fft.ifftshift(favg)).ravel()
         iter_out[:] = avg
         return iter_out
+    
+                                                                                                                    # DIFFERENCE MAP
 
-    def diffmap(self, iterate, fobs, p1):                                                                                               # Difference Map
+    def diffmap(self, iterate, fobs, p1):                       
         self.proj_divide(iterate, fobs, p1)
         return iterate + self.proj_concur(2. * p1 - iterate) - p1
 
-    def diffmap2(self, iterate, fobs, p1):                               # beta = -1
-        self.proj_concur(iterate, fobs, p1)
-        return iterate + self.proj_divide(2. * p1 - iterate) - p1
 
     def er(self, iterate, fobs, p1):
         self.proj_divide(iterate, fobs, p1)
@@ -461,8 +522,11 @@ def main():
             sys.stdout.flush()
             cp.cuda.Device(dev).use()
 
-    recon = EMC(args.config_file, num_streams=args.streams)
-    logf = open('EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
+    recon = EMC(args.config_file, num_streams=args.streams)                                           # Reconstruction with EMC
+
+    
+
+    logf = open('data/static/separation/touch/exp2/EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
     if rank == 0:
         logf.write('Iter  time(s)  change\n')
         logf.flush()
@@ -485,6 +549,7 @@ def main():
     if rank == 0 and numavg > 0:
         print('\n%.4e s/iteration on average' % (avgtime / numavg))
     logf.close()
+    
 
 if __name__ == '__main__':
     main()
