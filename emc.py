@@ -219,7 +219,7 @@ class EMC():                                                                    
             #    sol = f['solution'][:]
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
-            self.model[self.invmask.get()] = 0                                                                        # Inverse mask
+            #self.model[self.invmask.get()] = 0                                                                        # Inverse mask
             np.save(op.join(self.output_folder, 'model_000.npy'), self.model)                                    # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
