@@ -75,7 +75,7 @@ class FRC():
 
         return np.arange(rsize, dtype='f8') * binsize, fsc
 
-    def calc_rot(self, binsize=1., num_rot=180, do_abs=False):
+    def calc_rot(self, binsize=1., num_rot=180, do_abs=False, angle=None):
         '''Calculate best FRC with rotated versions of obj2
 
         Parameters;
@@ -92,10 +92,15 @@ class FRC():
         rsize = self._calc_binrad(binsize)
         max_cc = -1.
 
-        for i, r in enumerate(np.arange(num_rot)):
-            rotfmodel.real = ndimage.rotate(self.fobj2.real, r*360./num_rot,
+        if angle is None:
+            angvals = np.arange(num_rot)/num_rot*360.
+        else:
+            angvals = [angle]
+
+        for i, r in enumerate(angvals):
+            rotfmodel.real = ndimage.rotate(self.fobj2.real, r,
                                             order=1, prefilter=False, reshape=False)
-            rotfmodel.imag = ndimage.rotate(self.fobj2.imag, r*360./num_rot,
+            rotfmodel.imag = ndimage.rotate(self.fobj2.imag, r,
                                             order=1, prefilter=False, reshape=False)
 
             rvals, ccvals = self.calc(binsize=binsize, do_abs=do_abs, rsize=rsize, fobj2=rotfmodel)
@@ -108,11 +113,17 @@ class FRC():
         if self.verbose:
             sys.stderr.write('\n')
 
-        print('Best correlation for %.3f degrees' % (rmax*360./num_rot))
+        print('Best correlation for %.3f degrees' % rmax)
         return rvals, fvals
 
-    def _set_obj_n(self, obj, ind):
-        fobj = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(obj)))
+    def _set_obj_n(self, fr_obj, ind):
+        if np.iscomplexobj(fr_obj):
+            fobj = fr_obj
+            obj = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fr_obj))))
+        else:
+            obj = fr_obj
+            fobj = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(fr_obj)))
+
         if ind == 1:
             self.obj1 = obj
             self.fobj1 = fobj
