@@ -113,7 +113,7 @@ class FRC():
         if self.verbose:
             sys.stderr.write('\n')
 
-        print('Best correlation for %.3f degrees' % (rmax))
+        print('Best correlation for %.3f degrees' % rmax)
         return rvals, fvals
 
     def _set_obj_n(self, fr_obj, ind):

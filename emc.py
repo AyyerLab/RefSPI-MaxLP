@@ -3,7 +3,7 @@
 '''EMC reconstructor object and script'''
 
 import sys
-import os
+import os.path as op
 import argparse
 import configparser
 import time
@@ -141,6 +141,17 @@ class EMC():                                                                    
                                               config.get('emc', 'true_support_file'))
         self.true_solution_file = os.path.join(os.path.dirname(config_file),
                 config.get('emc', 'true_solution_file'))                                
+
+        self.photons_file = op.join(op.dirname(config_file),
+                config.get('emc', 'in_photons_file'))                  # Diffraction Pattern in holo.h5
+        self.output_folder = op.join(op.dirname(config_file),
+                config.get('emc', 'output_folder', fallback='data/'))      # SAVE : Folder
+        self.log_file = op.join(op.dirname(config_file),
+                config.get('emc', 'log_file', fallback = 'EMC.log'))    # SAVE : EMC.log
+        self.true_support_file = op.join(op.dirname(config_file),
+                config.get('emc', 'true_support_file'))             
+        self.true_solution_file = op.join(op.dirname(config_file),
+                config.get('emc', 'true_solution_file'))                    
          
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
@@ -223,7 +234,7 @@ class EMC():                                                                    
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
             self.model[self.invmask.get()] = 0                                                                        # Inverse mask
-            np.save('data/static/separation/center/exp2/model_000.npy', self.model)                                    # SAVE: Model
+            np.save(op.join(self.output_folder, 'model_000.npy'), self.model)                                    # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
         if self.need_scaling:                                                                                          # Scaling 
@@ -340,7 +351,7 @@ class EMC():                                                                    
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         #self.prob.clip(a_min=P_MIN, out=self.prob)
-        np.save('data/static/separation/center/exp2/prob.npy', self.prob.get())                                 # SAVE : Probability
+        np.save(op.join(self.output_folder, 'prob.npy'), self.prob.get())                                 # SAVE : Probability
 
     def _update_model(self, intens, dmodel, drange):                                                        # UPDATE : Model                       
         p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
@@ -435,12 +446,12 @@ class EMC():                                                                    
                     self.invsuppmask = cp.array(famodel < thresh)                                                      # Inverse Support : Threshold
 
             if iternum is None:
-                np.save('data/static/separation/center/exp2/model.npy', self.model)                                        # SAVE
+                np.save(op.join(self.output_folder, 'model.npy'), self.model)
             else:
-                np.save('data/static/separation/center/exp2/model_%.3d.npy'%iternum, self.model)                           # SAVE : Model
-                np.save('data/static/separation/center/exp2/intens_%.3d.npy'%iternum, intens.get())                        # SAVE : Intensity
-                np.save('data/static/separation/center/exp2/rmax_%.3d.npy'%iternum, self.rmax)                             # SAVE : Orientation
-                np.save('data/static/separation/center/exp2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                   # SAVE : Invsuppmask
+                np.save(op.join(self.output_folder, 'model_%.3d.npy'%iternum), self.model)                           # SAVE : Model
+                np.save(op.join(self.output_folder, 'intens_%.3d.npy'%iternum), intens.get())                        # SAVE : Intensity
+                np.save(op.join(self.output_folder, 'rmax_%.3d.npy'%iternum), self.rmax)                             # SAVE : Orientation
+                np.save(op.join(self.output_folder, 'invsupp_%.3d.npy'%iternum), self.invsuppmask)                   # SAVE : Invsuppmask
 
             self.model[self.invmask.get()] = 0                                                                      # Inverse Mask
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
@@ -499,7 +510,7 @@ def main():
                         help='Number of iterations')
     parser.add_argument('-c', '--config_file', default='config.ini',
                         help='Path to configuration file (default: config.ini)')
-    parser.add_argument('-d', '--devices', default=None,
+    parser.add_argument('-d', '--devices', default=None,i
                         help='Path to devices file')
     parser.add_argument('-s', '--streams', type=int, default=4,
                         help='Number of streams to use (default=4)')
@@ -525,7 +536,7 @@ def main():
 
     
 
-    logf = open('data/static/separation/center/exp2/EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
+    logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')                                                                       # WRITE and SAVE : Log file
     if rank == 0:
         logf.write('Iter  time(s)  change\n')
         logf.flush()

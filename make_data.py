@@ -5,6 +5,7 @@ import os
 import time
 import argparse
 import configparser
+import os.path as op
 
 import h5py
 import numpy as np
@@ -30,6 +31,8 @@ class DataGenerator():
 
         self.out_file = os.path.join(os.path.dirname(config_file),
                 config.get('make_data', 'out_photons_file'))                                                   # SAVE : Diffraction Pattern in holo.h5
+        self.output_folder =op.join(op.dirname(config_file),
+                config.get('emc', 'output_folder'))
 
         
 
@@ -257,15 +260,15 @@ class DataGenerator():
 
         model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))                  # O1
         #O1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model1))))
-        #np.save('data/static/separation/touch/exp1_1/O1.npy', O1 )
+        #np.save(op.join(self.output_folder,'O1.npy'),O1)
         #O1_intens = abs(model1)
-        #np.save('data/static/separation/touch/exp1_1/O1_intens.npy', O1_intens)
+        #np.save(op.join(self.output_folder,'O1_intens.npy'), O1_intens)
 
         model2 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object2)))                  # Object 2 (Wobble)
-        O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
-        #np.save('data/static/separation/touch/exp1_1/O2.npy', O2)
+        #O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
+        #np.save(op.join(self.output_folder,'O2.npy'), O2)
         #O2_intens = abs(model2)
-        #np.save('data/static/separation/touch/exp1_1/O2_intens.npy', O2_intens)
+        #np.save(op.join(self.output_folder,'O2_intens.npy'), O2_intens)
 
 
         bsize_model = int(np.ceil(self.size/32.))
@@ -281,10 +284,10 @@ class DataGenerator():
             
             if i < 1:
                 composite_object = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model))))
-                np.save('data/static/separation/center/exp2/composite_object_%.3d.npy'%i, composite_object)               # SAVE : Composite Object
+                np.save(op.join(self.output_folder,'composite_object_%.3d.npy'%i), composite_object)
 
-                composite_intens = abs(model.reshape(self.size,self.size))                                              # SAVE : Composite Intensity
-                np.save('data/static/separation/center/exp2/composite_intens_%.3d.npy'%i, composite_intens)
+                composite_intens = abs(model.reshape(self.size,self.size))              
+                np.save(op.join(self.output_folder,'composite_intens_%.3d.npy'%i), composite_intens)
             
 
             # Add GOLD Reference [Fourier Space]
@@ -294,7 +297,7 @@ class DataGenerator():
             view *= (mask1.ravel() + mask2.ravel())
             view *= self.mean_count / view.sum()
             if i < 1:
-                np.save('data/static/separation/center/exp2/comp_intens_wRef_%.3d.npy'%i, view.reshape(self.size,self.size))
+                np.save(op.join(self.output_folder,'comp_intens_wRef_%.3d.npy'%i), view.reshape(self.size,self.size))
 
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
