@@ -112,38 +112,35 @@ class EMC():                                                                    
         config = configparser.ConfigParser()
         config.read(config_file)
 
-        self.size = config.getint('parameters', 'size')                                          # Image Size + Zero Padding
-
-        self.support_area = config.getfloat('emc', 'support_area')                              # Support area 
-
+        self.size = config.getint('parameters', 'size')                                         # With  zero Padding
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')                                          # Orientation
 
-        self.shrinkwrap = config.getint('emc', 'shrinkwrap')                                    # Use Shrink Wrap : Yes/No
-        self.shrink_sigma = config.getint('emc', 'shrink_sigma')                                # Shrink Sigma with iteration : Yes/No
-        self.shrink_support_area = config.getint('emc', 'shrink_support_area')                  # Shrink Support Area with iteration : Yes/No
+        # Utilities
 
-        self.one_square_support = config.getint('emc', 'one_square_support')                    # Use One-Sqauare Support
-        self.two_square_support = config.getint('emc', 'two_square_support')                    # Use Two-square Support
-        self.true_support = config.getint('emc', 'true_support')                                # Use Composite Object for Support
-        self.true_solution = config.getint('emc', 'true_solution')                              # Use Composite object as true solution (initial model for EMC)
+        self.shrinkwrap = config.getint('emc', 'shrinkwrap')
+        self.shrink_sigma = config.getint('emc', 'shrink_sigma')
+        self.support_area = config.getfloat('emc', 'support_area')
+        self.shrink_support_area = config.getint('emc', 'shrink_support_area')
+        self.one_square_support = config.getint('emc', 'one_square_support')
+        self.two_square_support = config.getint('emc', 'two_square_support')
+
+        self.true_support = config.getint('emc', 'true_support')
+        self.true_solution = config.getint('emc', 'true_solution')
 
 
+        # Save and Get
 
         self.photons_file = os.path.join(os.path.dirname(config_file),
-                                         config.get('emc', 'in_photons_file'))                  # Diffraction Pattern in holo.h5
-
+                                         config.get('emc', 'in_photons_file'))
         self.output_folder = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'output_folder', fallback = 'data/static/separation/touch/exp2/'))      # SAVE : Folder
-
+                config.get('emc', 'output_folder'))     
         self.log_file = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'log_file', fallback = 'data/static/separation/touch/exp2/EMC.log'))    # SAVE : EMC.log
-
+                config.get('emc', 'log_file'))                          
         self.true_support_file = os.path.join(os.path.dirname(config_file),
-                                              config.get('emc', 'true_support_file'))               # Get composite object file for Support
-
+                                              config.get('emc', 'true_support_file'))
         self.true_solution_file = os.path.join(os.path.dirname(config_file),
-                config.get('emc', 'true_solution_file'))                                            # Get composite object file as True Solution to initialize EMC
+                config.get('emc', 'true_solution_file'))                                
          
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
@@ -156,21 +153,20 @@ class EMC():                                                                    
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
         self.num_states = len(self.shiftx)
-        print(self.num_states, 'sampled states')                                                                      # Sampled States
+        print(self.num_states, 'sampled states')
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
 
-                                                                                                                   # Inverse Mask
+        #Invmask
         self.invmask = cp.zeros(self.size**2, dtype=np.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
-        # Inverse Mask Supports
+        #Invsuppmask
         self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
-
         # Composite Object as Support
         if self.true_support == 1:
             composite_object = cp.load(self.true_support_file)
@@ -178,14 +174,16 @@ class EMC():                                                                    
 
         # One-Square Support
         if self.one_square_support == 1:
-            self.invsuppmask[88:201,88:201]  = False
+            self.invsuppmask[140:195,140:195]  = False
 
         # Two-Square Support
         if self.two_square_support == 1:
-            self.invsuppmask[65:120,65,120]  = False
-            self.invsuppmask[40:70,40:70]  = False                                                                                                                                            
+            self.invsuppmask[140:168,140,168]  = False
+            self.invsuppmask[168:195,168:195]  = False                                                                                                                                      
 
-        self.probmask = cp.zeros(self.size**2, dtype='i4')                                                             # Prob Mask
+
+        #Probmask
+        self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
@@ -206,17 +204,18 @@ class EMC():                                                                    
             sys.stdout.flush()
         self.model = np.empty((self.size**2,), dtype='c16')
 
-        if self.rank == 0:                                                                                          
+        if self.rank == 0:        
+        # True Solution
             if self.true_solution == 1:
-                true_model = np.load(self.true_solution_file)                                                             # Composite object as true Solution for starting model
+                true_model = np.load(self.true_solution_file)
                 true_model[self.invsuppmask.get()] = 0
                 self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
             else:
                 rmodel = np.random.random((self.size,)*2)
                 rmodel[self.invsuppmask.get()] = 0                                                                   # Inverse Support Mask
-                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                             # Real to fourier Space
+                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()                        # Real to fourier Space
 
-            self.model /= 2e3
+            self.model /= 2.e3
 
             # Solution as init
             #with h5py.File('data/holo_dia.h5', 'r') as f:
@@ -224,7 +223,7 @@ class EMC():                                                                    
             #self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
 
             self.model[self.invmask.get()] = 0                                                                        # Inverse mask
-            np.save('data/static/separation/touch/exp2/model_000.npy', self.model)                                    # SAVE: Model
+            np.save('data/static/separation/center/exp2/model_000.npy', self.model)                                    # SAVE: Model
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
         if self.need_scaling:                                                                                          # Scaling 
@@ -341,7 +340,7 @@ class EMC():                                                                    
         self.comm.Allreduce([psum_p, MPI.DOUBLE], [psum, MPI.DOUBLE], op=MPI.SUM)
         self.prob = cp.divide(self.prob, cp.array(psum), self.prob)
         #self.prob.clip(a_min=P_MIN, out=self.prob)
-        np.save('data/static/separation/touch/exp2/prob.npy', self.prob.get())                                 # SAVE : Probability
+        np.save('data/static/separation/center/exp2/prob.npy', self.prob.get())                                 # SAVE : Probability
 
     def _update_model(self, intens, dmodel, drange):                                                        # UPDATE : Model                       
         p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
@@ -375,7 +374,7 @@ class EMC():                                                                    
             intens[r][sel] /= mweights[snum][sel]
             intens[r] = intens[r] / p_norm[i] - self.dset.bg
             # Centrosymmetrization
-            intens2d = intens[r].reshape(385,385)
+            intens2d = intens[r].reshape(self.size,self.size)
             intens2d = 0.5 * (intens2d + intens2d[::-1,::-1])
             intens[r] = intens2d.ravel()
         [s.synchronize() for s in self.stream_list]
@@ -412,7 +411,7 @@ class EMC():                                                                    
 
             # SHRINK WRAP
             if self.shrinkwrap == 1:
-                if iternum < 2 or iternum % 2 == 0:                             
+                if iternum < 5 or iternum % 5 == 0:                             
                     amodel =np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))       # OBJECT
 
                     # SHRINK SIGMA
@@ -436,12 +435,12 @@ class EMC():                                                                    
                     self.invsuppmask = cp.array(famodel < thresh)                                                      # Inverse Support : Threshold
 
             if iternum is None:
-                np.save('data/static/separation/touch/exp2/model.npy', self.model)                                        # SAVE
+                np.save('data/static/separation/center/exp2/model.npy', self.model)                                        # SAVE
             else:
-                np.save('data/static/separation/touch/exp2/model_%.3d.npy'%iternum, self.model)                           # SAVE : Model
-                np.save('data/static/separation/touch/exp2/intens_%.3d.npy'%iternum, intens.get())                        # SAVE : Intensity
-                np.save('data/static/separation/touch/exp2/rmax_%.3d.npy'%iternum, self.rmax)                             # SAVE : Orientation
-                np.save('data/static/separation/touch/exp2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                   # SAVE : Invsuppmask
+                np.save('data/static/separation/center/exp2/model_%.3d.npy'%iternum, self.model)                           # SAVE : Model
+                np.save('data/static/separation/center/exp2/intens_%.3d.npy'%iternum, intens.get())                        # SAVE : Intensity
+                np.save('data/static/separation/center/exp2/rmax_%.3d.npy'%iternum, self.rmax)                             # SAVE : Orientation
+                np.save('data/static/separation/center/exp2/invsupp_%.3d.npy'%iternum, self.invsuppmask)                   # SAVE : Invsuppmask
 
             self.model[self.invmask.get()] = 0                                                                      # Inverse Mask
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
@@ -526,7 +525,7 @@ def main():
 
     
 
-    logf = open('data/static/separation/touch/exp2/EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
+    logf = open('data/static/separation/center/exp2/EMC.log', 'w')                                                                       # WRITE and SAVE : Log file
     if rank == 0:
         logf.write('Iter  time(s)  change\n')
         logf.flush()
