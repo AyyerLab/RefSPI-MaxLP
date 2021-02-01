@@ -15,17 +15,14 @@ class DataGenerator():
         config = configparser.ConfigParser()
         config.read(config_file)
 
-        self.size = config.getint('parameters', 'size')                                                        # Image Size + Zero Padding 
-        self.size1 = config.getint('parameters', 'size1')                                                      # Image Size region for Composite Object
+        self.size = config.getint('parameters', 'size')                                                        # With Zero Padding 
+        self.sizeC = config.getint('parameters', 'sizeC')                                                      # Image region including Composite Object
 
-        self.num_circ1 = config.getint('make_data', 'num_circ1')                                               # Object 1 
-        self.num_circ2 = config.getint('make_data', 'num_circ2')                                               # Object 2
-
-        self.num_data = config.getint('make_data', 'num_data')                                                 # Number of Diffraction patterns
+        self.num_data = config.getint('make_data', 'num_data')  
         self.fluence = config.get('make_data', 'fluence', fallback='constant')                                 # Intensity for incident beam
         self.mean_count = config.getfloat('make_data', 'mean_count')
         self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
-        self.rel_scale = config.getfloat('make_data', 'rel_scale', fallback=0.)                                # Relative Sphere Intensity Scaling
+        self.rel_scale = config.getfloat('make_data', 'rel_scale')                                             # Relative Sphere Intensity Scaling
 
         self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]                    # Mean and STD in diameter of GOLD sphere
         self.shift_sigma = config.getfloat('make_data', 'shift_sigma')                                         # STD in sphere center : GOLD
@@ -62,19 +59,19 @@ class DataGenerator():
         mcen = self.size // 2
         x, y = cp.indices((self.size,self.size), dtype='f8')
 
-        # Object 1 (Static)
+        # Generating Random or specific object
 
-        for i in range(self.num_circ1):
-
-            #rad1 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.size1/ 25.
-            rad1 = (0.7 + 0.3*(cp.cos(2.5*i) - cp.sin(i/4))) * self.size1/ 10.
+        # O1
+        num_circ1 = 55
+        for i in range(num_circ1):
+            #rad1 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 25.
+            rad1 = (0.7 + 0.3*(cp.cos(2.5*i) - cp.sin(i/4))) * self.sizeC/ 20.
 
             while True:
-
-                #cen = cp.random.rand(2, dtype='f8') * self.size1 / 5. + mcen * 4./ 5.
+                #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 5. + mcen * 4./ 5.
                 #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad1)
-                cen0 =(3*cp.sin(2*i) + 0.5*cp.sin(i/2)) * self.size1 / 25.  + mcen * 4./ 5.
-                cen1 = (0.5*cp.cos(i/2) + 3* cp.cos(i/2)) * self.size1 / 25.  + mcen * 4./ 5.
+                cen0 =(3*cp.sin(2*i) + 0.5*cp.sin(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
+                cen1 = (0.5*cp.cos(i/2) + 3* cp.cos(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
                 dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad1)
 
                 if dist < mcen:
@@ -84,19 +81,18 @@ class DataGenerator():
             diskrad = cp.sqrt((x - cen0)**2 + (y - cen1)**2)
             mask1[diskrad <= rad1] += 1. - (diskrad[diskrad <= rad1] / rad1)**2
 
-        # Object 2 (Wobble)
-
-        for i in range(self.num_circ2):
-
-            #rad2 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.size1/ 22         # Radius of Spheres
-            rad2 = (0.7 + 0.3*(cp.sin(i) - cp.cos(i/2))) * self.size1/ 10.
+        # O2
+        
+        num_circ2 = 25
+        for i in range(num_circ2):
+            #rad2 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 22         # Radius of Spheres
+            rad2 = (0.7 + 0.3*(cp.sin(i) - cp.cos(i/2))) * self.sizeC/ 30.
 
             while True:
-
-                #cen = cp.random.rand(2, dtype='f8') * self.size1 / 10. + mcen * 4./6.  # Size of cluster + Distance from centre
+                #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 10. + mcen * 4./6.  # Size of cluster + Distance from centre
                 #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad2)
-                cen0 = (cp.sin(2*i) - 3*cp.cos(i)) * self.size1 / 40. + mcen * 4.3/7.
-                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.size1 / 40. + mcen * 4.3/7.
+                cen0 = (cp.sin(2*i) - 3*cp.cos(i)) * self.sizeC / 60. + mcen * 6.4/7.
+                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.sizeC / 60. + mcen * 6.4/7.
                 dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad2)
 
                 if dist < mcen:
@@ -248,11 +244,8 @@ class DataGenerator():
 
         # Orientation
         angles = np.random.randn(self.num_data) * 2. * np.pi
-        #angle = np.ones(self.num_data) * 2 * np.pi
-        angles = np.zeros(self.num_data)
-        #angle = np.zeros(self.num_data)
+        #angles = np.zeros(self.num_data)
         fptr['true_angles'] = angles
-        #fptr['true_angles'] = angle
 
         # Initialization
 
@@ -262,17 +255,17 @@ class DataGenerator():
 
         # Models
 
-        model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))                  # Object 1 (Static)
-        object1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.ifftshift(model1))))
-        np.save('data/makedata/intensity_scaled/object1.npy', object1 )
-        object1_intens = abs(model1.reshape(385,385))
-        np.save('data/makedata/intensity_scaled/object1_intens.npy', object1_intens)
+        model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))                  # O1
+        #O1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model1))))
+        #np.save('data/static/separation/touch/exp1_1/O1.npy', O1 )
+        #O1_intens = abs(model1)
+        #np.save('data/static/separation/touch/exp1_1/O1_intens.npy', O1_intens)
 
         model2 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object2)))                  # Object 2 (Wobble)
-        object2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.ifftshift(model2))))
-        np.save('data/makedata/intensity_scaled/object2.npy', object2)
-        object2_intens = abs(model2.reshape(385,385))
-        np.save('data/makedata/intensity_scaled/object2_intens.npy', object2_intens)
+        O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
+        #np.save('data/static/separation/touch/exp1_1/O2.npy', O2)
+        #O2_intens = abs(model2)
+        #np.save('data/static/separation/touch/exp1_1/O2_intens.npy', O2_intens)
 
 
         bsize_model = int(np.ceil(self.size/32.))
@@ -286,12 +279,12 @@ class DataGenerator():
             # Composite Object
             model = model1 + model2 * cp.exp(2* cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,1])))
             
-            if i <= 3:
+            if i < 1:
                 composite_object = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model))))
-                np.save('data/makedata/intensity_scaled/composite_object_%.3d.npy'%i, composite_object)               # SAVE : Composite Object
+                np.save('data/static/separation/center/exp2/composite_object_%.3d.npy'%i, composite_object)               # SAVE : Composite Object
 
-                composite_intens = abs(model.reshape(385,385))                                              # SAVE : Composite Intensity
-                np.save('data/makedata/intensity_scaled/composite_intens_%.3d.npy'%i, composite_intens)
+                composite_intens = abs(model.reshape(self.size,self.size))                                              # SAVE : Composite Intensity
+                np.save('data/static/separation/center/exp2/composite_intens_%.3d.npy'%i, composite_intens)
             
 
             # Add GOLD Reference [Fourier Space]
@@ -300,6 +293,8 @@ class DataGenerator():
                 (model, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
             view *= (mask1.ravel() + mask2.ravel())
             view *= self.mean_count / view.sum()
+            if i < 1:
+                np.save('data/static/separation/center/exp2/comp_intens_wRef_%.3d.npy'%i, view.reshape(self.size,self.size))
 
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
