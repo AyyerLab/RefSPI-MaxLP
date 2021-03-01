@@ -7,30 +7,41 @@ import argparse
 import configparser
 import os.path as op
 
+
 import h5py
 import numpy as np
 import cupy as cp
+
+from scipy import ndimage
 
 class DataGenerator():
     def __init__(self, config_file):
         config = configparser.ConfigParser()
         config.read(config_file)
-
-        self.size = config.getint('parameters', 'size')                                                        # With Zero Padding 
-        self.sizeC = config.getint('parameters', 'sizeC')                                                      # Image region including Composite Object
+        
+        #Image size with zero padding
+        self.size = config.getint('parameters', 'size')
+        #Image region including composite object
+        self.sizeC = config.getint('parameters', 'sizeC')
 
         self.num_data = config.getint('make_data', 'num_data')  
-        self.fluence = config.get('make_data', 'fluence', fallback='constant')                                 # Intensity for incident beam
+        self.fluence = config.get('make_data', 'fluence', fallback='constant')
         self.mean_count = config.getfloat('make_data', 'mean_count')
         self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
-        self.rel_scale = config.getfloat('make_data', 'rel_scale')                                             # Relative Sphere Intensity Scaling
+        
+        #Relative scaling of AuNP intensity
+        self.rel_scale = config.getfloat('make_data', 'rel_scale')
 
-        self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]                    # Mean and STD in diameter of GOLD sphere
-        self.shift_sigma = config.getfloat('make_data', 'shift_sigma')                                         # STD in sphere center : GOLD
-        self.shift_sigma2 = config.getfloat('make_data', 'shift_sigma2')                                       # STD in sphere center : Object 2(Wobble)
+        self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]
 
+        #STD in sphere centers of AuNP
+        self.shift_sigma = config.getfloat('make_data', 'shift_sigma')
+        #STD in sphere centers of O2(Wobble)
+        self.shift_sigma2 = config.getfloat('make_data', 'shift_sigma2')
+        
+        #Save Data
         self.out_file = os.path.join(os.path.dirname(config_file),
-                config.get('make_data', 'out_photons_file'))                                                   # SAVE : Diffraction Pattern in holo.h5
+                config.get('make_data', 'out_photons_file'))
         self.output_folder =op.join(op.dirname(config_file),
                 config.get('emc', 'output_folder'))
 
@@ -39,18 +50,25 @@ class DataGenerator():
         if self.fluence not in ['constant', 'gamma']:
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
 
-        with open('kernels.cu', 'r') as f:                                                                     # Kernels.cu
+        
+        #Kernels
+
+        with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
-        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')                                         # Sphere : F_s(q,d) [Fourier]
-        self.k_slice_gen = kernels.get_function('slice_gen')                                                   # In-plane rotations
+        #Holography 
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
+        #In-plane rotations
+        self.k_slice_gen = kernels.get_function('slice_gen')
        
-                                                                                                               
-        self.object1 = cp.zeros((self.size, self.size), dtype='f8')                                            # Object 1 (Static)
-        self.object2 = cp.zeros((self.size, self.size), dtype='f8')                                            # Object 2 (Wobble) 
+        #O1(Static)                                                                                                       
+        self.object1 = cp.zeros((self.size, self.size), dtype='f8')
+        #O2(Wobble)
+        self.object2 = cp.zeros((self.size, self.size), dtype='f8')
         
         self.object_sum = 0
 
-        self.bgmask = cp.zeros((self.size, self.size), dtype = 'f8')                                           # Background 
+        #Background
+        self.bgmask = cp.zeros((self.size, self.size), dtype = 'f8')
         self.bgmask_sum = 0
 
     def make_obj(self, bg=False):
@@ -62,51 +80,58 @@ class DataGenerator():
         mcen = self.size // 2
         x, y = cp.indices((self.size,self.size), dtype='f8')
 
-        # Generating Random or specific object
-
+        #Generating Objects (random or specific)
         # O1
         num_circ1 = 55
         for i in range(num_circ1):
+            #Random
             #rad1 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 25.
+
+            #Specific
             rad1 = (0.7 + 0.3*(cp.cos(2.5*i) - cp.sin(i/4))) * self.sizeC/ 20.
 
             while True:
+                #Random
                 #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 5. + mcen * 4./ 5.
                 #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad1)
+                #Specific
                 cen0 =(3*cp.sin(2*i) + 0.5*cp.sin(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
                 cen1 = (0.5*cp.cos(i/2) + 3* cp.cos(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
                 dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad1)
 
                 if dist < mcen:
                     break
-
+            #Random
             #diskrad = cp.sqrt((x - cen[0])**2 + (y- cen[1])**2)
+            #Specific
             diskrad = cp.sqrt((x - cen0)**2 + (y - cen1)**2)
             mask1[diskrad <= rad1] += 1. - (diskrad[diskrad <= rad1] / rad1)**2
 
         # O2
-        
         num_circ2 = 25
         for i in range(num_circ2):
-            #rad2 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 22         # Radius of Spheres
+            #Random
+            #rad2 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 22
+            #Specific
             rad2 = (0.7 + 0.3*(cp.sin(i) - cp.cos(i/2))) * self.sizeC/ 30.
 
             while True:
+                #Random
                 #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 10. + mcen * 4./6.  # Size of cluster + Distance from centre
                 #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad2)
-                cen0 = (cp.sin(2*i) - 3*cp.cos(i)) * self.sizeC / 60. + mcen * 6.4/7.
-                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.sizeC / 60. + mcen * 6.4/7.
+                #Specific
+                cen0 = (cp.sin(2*i) - 3*cp.cos(i)) * self.sizeC / 60. + mcen * 5.71/7.
+                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.sizeC / 60. + mcen * 5.71/7.
                 dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad2)
 
                 if dist < mcen:
                     break
-
+            #Random
             #diskrad = cp.sqrt((x - cen[0])**2 + (y- cen[1])**2)
+            #Specific
             diskrad = cp.sqrt((x-cen0)**2 + (y - cen1)**2)
             mask2[diskrad <= rad2] += 1. - (diskrad[diskrad <= rad2] / rad2)**2
 
-
-        # Sum Object
 
         if bg:
             #mask *= self.bg_count / mask.sum()
@@ -168,23 +193,17 @@ class DataGenerator():
         cen = self.size // 2
         mcen = self.size // 2.
 
-        # Protein 1 (Static)
-
+        #O1
         mask1 = cp.ones(self.object1.shape, dtype='f8')
         pixrad1 = cp.sqrt((x - cen)**2 + (y - cen)**2)
         mask1[pixrad1<4] = 0
         mask1[pixrad1>=cen] = 0
 
-        # Protein 2 (Wobbling)
-
+        #O2
         mask2 = cp.ones(self.object2.shape, dtype='f8')
         pixrad2 = cp.sqrt((x - cen)**2 + (y - cen)**2)
         mask2[pixrad2<4] = 0
         mask2[pixrad2>=cen] = 0
-
-        # Wobbling
-        qx = (x - mcen) / (2 * mcen)
-        qy = (y - mcen) / (2 * mcen)
 
 
         fptr = h5py.File(self.out_file, 'a')
@@ -194,9 +213,11 @@ class DataGenerator():
         if 'place_multi' in fptr: del fptr['place_multi']
         if 'count_multi' in fptr: del fptr['count_multi']
         if 'num_pix' in fptr: del fptr['num_pix']
-
-        if 'true_shifts' in fptr: del fptr['true_shifts']                                       # GOLD Sphere
-        if 'true_shifts2' in fptr: del fptr['true_shifts2']                                     # Object 2
+        
+        #AuNP
+        if 'true_shifts' in fptr: del fptr['true_shifts']
+        #O2
+        if 'true_shifts2' in fptr: del fptr['true_shifts2']
 
         if 'true_diameters' in fptr: del fptr['true_diameters']                                
         if 'true_angles' in fptr: del fptr['true_angles']
@@ -215,29 +236,22 @@ class DataGenerator():
         ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
         multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
-        # Shifts for Sphere center
-
-        #shifts = np.random.random((self.num_data, 2))*6 - 3
-        #shifts = np.random.randn(self.num_data, 2)*1.
-        #shifts = np.zeros((self.num_data, 2))
-        shifts = np.random.randn(self.num_data, 2)*self.shift_sigma                                    # GOLD
+        #Shifts for sphere center of AuNP
+        shifts = np.random.randn(self.num_data, 2)*self.shift_sigma
         fptr['true_shifts'] = shifts
-
-        shifts2 = np.random.randn(self.num_data, 2)*self.shift_sigma2                                  # Object 2
+        
+        #Shifts for sphere center for O2
+        shifts2 = np.random.randn(self.num_data, 2)*self.shift_sigma2
         fptr['true_shifts2'] = shifts2
 
         # Fluence and scaling 
-
         if self.fluence == 'gamma':
             scale = np.random.gamma(2., 0.5, self.num_data)
         else:
             scale = np.ones(self.num_data, dtype='f8')
         fptr['scale'] = scale
 
-        # Diameters of sphere : GOLD
-
-        #diameters = np.random.randn(self.num_data)*0.5 + 7.
-        #diameters = np.ones(self.num_data)*7.
+        #Diameters of AuNP sphere
         diameters = np.random.randn(self.num_data)*self.dia_params[1] + self.dia_params[0]
         fptr['true_diameters'] = diameters
 
@@ -250,39 +264,48 @@ class DataGenerator():
         #angles = np.zeros(self.num_data)
         fptr['true_angles'] = angles
 
-        # Initialization
-
         view = cp.zeros(self.size**2, dtype='f8')
         rview = cp.zeros_like(view, dtype='f8')
         zmask = cp.zeros_like(view, dtype='f8')
 
-        # Models
+        #Fourier Models
+        #O1
+        model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))
+        O1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model1))))
+        np.save(op.join(self.output_folder,'O1.npy'),O1)
+        O1_intens = abs(model1)
+        np.save(op.join(self.output_folder,'O1_intens.npy'), O1_intens)
+        
+        #O2
+        model2 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object2)))
+        O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
+        np.save(op.join(self.output_folder,'O2.npy'), O2)
+        O2_intens = abs(model2)
+        np.save(op.join(self.output_folder,'O2_intens.npy'), O2_intens)
 
-        model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))                  # O1
-        #O1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model1))))
-        #np.save(op.join(self.output_folder,'O1.npy'),O1)
-        #O1_intens = abs(model1)
-        #np.save(op.join(self.output_folder,'O1_intens.npy'), O1_intens)
-
-        model2 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object2)))                  # Object 2 (Wobble)
-        #O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
-        #np.save(op.join(self.output_folder,'O2.npy'), O2)
-        #O2_intens = abs(model2)
-        #np.save(op.join(self.output_folder,'O2_intens.npy'), O2_intens)
-
+        #Blurred O2 in Composite Object
+        bcomposite_object = O1.get() + ndimage.uniform_filter(O2.get(), 6)
+        np.save(op.join(self.output_folder, 'bcomposite_object'), bcomposite_object)
 
         bsize_model = int(np.ceil(self.size/32.))
         stime = time.time()
 
+        qx = (x - mcen) / (2 * mcen)
+        qy = (y - mcen) / (2 * mcen) 
+
 
         # Diffraction Patterns 
-
         for i in range(self.num_data):
 
-            # Composite Object
-            model = model1 + model2 * cp.exp(2* cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,1])))
-            
-            if i < 1:
+            shifts2[i,0] = np.where(shifts2[i,0]>0.75, 8,8)
+            #if i % 2 == 0:
+            #    model =  model1 + model2 * cp.exp(2 * cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,0])))
+            #else:
+            model =  model1 + (np.fliplr(model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + (-3.7) * qy * shifts2[i,0]))))  
+                                      + model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,0])))) / 2
+
+            if i<5:
+                #Composite Objects
                 composite_object = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model))))
                 np.save(op.join(self.output_folder,'composite_object_%.3d.npy'%i), composite_object)
 
@@ -290,21 +313,23 @@ class DataGenerator():
                 np.save(op.join(self.output_folder,'composite_intens_%.3d.npy'%i), composite_intens)
             
 
-            # Add GOLD Reference [Fourier Space]
+            #AuNP as Reference
 
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (model, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
             view *= (mask1.ravel() + mask2.ravel())
             view *= self.mean_count / view.sum()
-            if i < 1:
+
+            if i < 5:
+                #Intensity with Reference attached
                 np.save(op.join(self.output_folder,'comp_intens_wRef_%.3d.npy'%i), view.reshape(self.size,self.size))
 
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
 
-            
-            frame = cp.random.poisson(rview, dtype='i4')                                       # Poisson Noise
-            
+            #Poisson Noise
+            frame = cp.random.poisson(rview, dtype='i4')
+    
             place_ones[i] = cp.where(frame == 1)[0].get()
             place_multi[i] = cp.where(frame > 1)[0].get()
             count_multi[i] = frame[frame > 1].get()
