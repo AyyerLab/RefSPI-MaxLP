@@ -90,8 +90,6 @@ class Dataset():
         self.powder = cp.array(self.powder)
         return self.powder
 
-# EMC
-
 class EMC():                                    
     '''Reconstructor object using parameters from config file
 
@@ -119,7 +117,6 @@ class EMC():
         self.num_rot = config.getint('emc', 'num_rot')                              
 
         # Utilities
-
         self.shrinkwrap = config.getint('emc', 'shrinkwrap')
         self.shrink_sigma = config.getint('emc', 'shrink_sigma')
         self.support_area = config.getfloat('emc', 'support_area')
@@ -131,18 +128,13 @@ class EMC():
 
 
         # Save & Get data
-
         self.photons_file = op.join(op.dirname(config_file), config.get('emc', 'in_photons_file'))
         self.output_folder = op.join(op.dirname(config_file), config.get('emc', 'output_folder'))     
         self.log_file = op.join(op.dirname(config_file), config.get('emc', 'log_file'))                          
         #self.true_support_file = op.join(op.dirname(config_file), config.get('emc', 'true_support_file'))
-        self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))                                
-        self.photons_file = op.join(op.dirname(config_file), config.get('emc', 'in_photons_file'))       
-        self.output_folder = op.join(op.dirname(config_file), config.get('emc', 'output_folder')) 
-        self.log_file = op.join(op.dirname(config_file), config.get('emc', 'log_file', fallback = 'EMC.log'))
+        self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))                                       
         self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
-        self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))
-        self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))                    
+        self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))                
          
         #Scaling
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
@@ -218,7 +210,7 @@ class EMC():
                 true_model[self.invsuppmask.get()] = 0
                 self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
             else:
-                #Random noise model
+                #Random noise as model
                 rmodel = np.random.random((self.size,)*2)
                 rmodel[self.invsuppmask.get()] = 0  
                 self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
@@ -254,7 +246,6 @@ class EMC():
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
     
-    #Run EMC
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMC algorithm
 
@@ -279,7 +270,6 @@ class EMC():
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
-        #EMC Iteration Steps
         b_start = 0
         for b in block_sizes:
             drange = (b_start, b_start + b)
@@ -289,7 +279,7 @@ class EMC():
             b_start += b
         self._normalize_model(intens, dmodel, iternum) 
     
-    #Calculate Probability
+
     def _calculate_prob(self, dmodel, views, drange):
         s = drange[0]
         e = drange[1]
@@ -407,24 +397,22 @@ class EMC():
 
             #Divide and Concur
 
-            for i in range(20):
+            for i in range(1000):
                 iter_curr = self.er(iter_curr, fobs, iter_p1)
-            for i in range(100):
+            for i in range(1000):
                 iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
 
-
             dmodel = self.proj_concur(iter_curr)[0]
             self.model = dmodel.get()     
 
-
-            #SHRINK WRAP
+            #Shrinkwrap
             if self.shrinkwrap == 1:
                 if iternum < 5 or iternum % 5 == 0:                             
                     amodel =np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
 
-            #SHRINK SIGMA
+            #ShrinkSigma
                     if self.shrink_sigma == 1:
                         sig = (iternum - 1)/99
                         sigma = 10*special.erfc(sig)
@@ -437,7 +425,7 @@ class EMC():
 
                     
                     famodel = ndimage.gaussian_filter(amodel, sigma)
-            # SHRINK SUPOORT AREA
+            #Shrink Support Area
                     if self.shrink_support_area == 0:
                         thresh = np.sort(famodel.ravel())[int((1 - self.support_area)*amodel.size)]
 
@@ -446,15 +434,15 @@ class EMC():
             if iternum is None:
                 np.save(op.join(self.output_folder, 'model.npy'), self.model)
             else:
-                np.save(op.join(self.output_folder, 'model_%.3d.npy'%iternum), self.model)
-                np.save(op.join(self.output_folder, 'intens_%.3d.npy'%iternum), intens.get())
-                np.save(op.join(self.output_folder, 'rmax_%.3d.npy'%iternum), self.rmax)
-                np.save(op.join(self.output_folder, 'invsupp_%.3d.npy'%iternum), self.invsuppmask)
+                np.save(op.join(self.output_folder, 'Rmodel_%.3d.npy'%iternum), self.model)
+                np.save(op.join(self.output_folder, 'Rintens_%.3d.npy'%iternum), intens.get())
+                np.save(op.join(self.output_folder, 'Rrmax_%.3d.npy'%iternum), self.rmax)
+                np.save(op.join(self.output_folder, 'Rinvsupp_%.3d.npy'%iternum), self.invsuppmask)
 
             self.model[self.invmask.get()] = 0
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
     
-    #Phase ramp AuNP
+    #Phase ramps of  AuNP
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)         
     
@@ -468,7 +456,6 @@ class EMC():
         s[s==0] = 1.e-5
         return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
 
-    #DIVIDE AND CONCUR
     def proj_divide(self, iter_in, data, iter_out): 
         for n in range(self.num_states):
             snum = n % self.num_streams
