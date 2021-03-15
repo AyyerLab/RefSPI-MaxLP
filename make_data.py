@@ -1,21 +1,23 @@
 #!/usr/bin/env python
 
+'Module for generating Objects (Real Space) and corresponding diffraction patterns '
+
 import sys
 import os
 import time
 import argparse
 import configparser
 import os.path as op
-
-
 import h5py
 import numpy as np
 import cupy as cp
 
 from scipy import ndimage
 
+
 class DataGenerator():
     def __init__(self, config_file):
+
         config = configparser.ConfigParser()
         config.read(config_file)
         
@@ -31,38 +33,33 @@ class DataGenerator():
         
         #Relative scaling of AuNP intensity
         self.rel_scale = config.getfloat('make_data', 'rel_scale')
-
+        #AuNP sphere diameter range
         self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]
-
         #STD in sphere centers of AuNP
         self.shift_sigma = config.getfloat('make_data', 'shift_sigma')
+
         #STD in sphere centers of O2(Wobble)
         self.shift_sigma2 = config.getfloat('make_data', 'shift_sigma2')
         
         #Save Data
-        self.out_file = os.path.join(os.path.dirname(config_file),
-                config.get('make_data', 'out_photons_file'))
-        self.output_folder =op.join(op.dirname(config_file),
-                config.get('emc', 'output_folder'))
-
-        
+        self.out_file = os.path.join(os.path.dirname(config_file), config.get('make_data', 'out_photons_file'))
+        self.output_folder =op.join(op.dirname(config_file), config.get('emc', 'output_folder'))
 
         if self.fluence not in ['constant', 'gamma']:
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
 
         
         #Kernels
-
         with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
+
         #Holography 
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         #In-plane rotations
         self.k_slice_gen = kernels.get_function('slice_gen')
        
-        #O1(Static)                                                                                                       
+        #O1(Static) & O2(Wobble)                                                                                                       
         self.object1 = cp.zeros((self.size, self.size), dtype='f8')
-        #O2(Wobble)
         self.object2 = cp.zeros((self.size, self.size), dtype='f8')
         
         self.object_sum = 0
@@ -81,6 +78,7 @@ class DataGenerator():
         x, y = cp.indices((self.size,self.size), dtype='f8')
 
         #Generating Objects (random or specific)
+
         # O1
         num_circ1 = 55
         for i in range(num_circ1):
@@ -93,43 +91,50 @@ class DataGenerator():
             while True:
                 #Random
                 #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 5. + mcen * 4./ 5.
-                #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad1)
+                #dist = float(cp.sqrt((cen[0] - mcen)**2 + (cen[1] - mcen)**2) + rad1)
+
                 #Specific
-                cen0 =(3*cp.sin(2*i) + 0.5*cp.sin(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
-                cen1 = (0.5*cp.cos(i/2) + 3* cp.cos(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
-                dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad1)
+                cen0 = (3 * cp.sin(2*i) + 0.5 * cp.sin(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
+                cen1 = (0.5 * cp.cos(i/2) + 3 * cp.cos(i/2)) * self.sizeC / 45.  + mcen * 4./ 4.4
+                dist = float(cp.sqrt((cen0 - mcen)**2 + (cen1 - mcen)**2) + rad1)
 
                 if dist < mcen:
                     break
             #Random
             #diskrad = cp.sqrt((x - cen[0])**2 + (y- cen[1])**2)
+
             #Specific
             diskrad = cp.sqrt((x - cen0)**2 + (y - cen1)**2)
+
             mask1[diskrad <= rad1] += 1. - (diskrad[diskrad <= rad1] / rad1)**2
 
         # O2
         num_circ2 = 25
         for i in range(num_circ2):
             #Random
-            #rad2 = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 22
+            #rad2 = (0.7 + 0.3 * cp.random.rand(1, dtype = 'f8')) * self.sizeC/ 22.
+
             #Specific
-            rad2 = (0.7 + 0.3*(cp.sin(i) - cp.cos(i/2))) * self.sizeC/ 30.
+            rad2 = (0.7 + 0.3 *(cp.sin(i) - cp.cos(i/2))) * self.sizeC/ 30.
 
             while True:
                 #Random
                 #cen = cp.random.rand(2, dtype='f8') * self.sizeC / 10. + mcen * 4./6.  # Size of cluster + Distance from centre
-                #dist = float(cp.sqrt((cen[0]-mcen)**2 + (cen[1]-mcen)**2) + rad2)
+                #dist = float(cp.sqrt((cen[0] - mcen)**2 + (cen[1] - mcen)**2) + rad2)
+
                 #Specific
-                cen0 = (cp.sin(2*i) - 3*cp.cos(i)) * self.sizeC / 60. + mcen * 5.71/7.
-                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.sizeC / 60. + mcen * 5.71/7.
-                dist = float(cp.sqrt((cen0-mcen)**2 + (cen1-mcen)**2) + rad2)
+                cen0 = (cp.sin(2*i) - 3 * cp.cos(i)) * self.sizeC / 60. + mcen * 5.71 /7.
+                cen1 = (cp.cos(i) - cp.sin(i/2)) * self.sizeC / 60. + mcen * 5.71 /7.
+                dist = float(cp.sqrt((cen0 - mcen)**2 + (cen1 - mcen)**2) + rad2)
 
                 if dist < mcen:
                     break
             #Random
             #diskrad = cp.sqrt((x - cen[0])**2 + (y- cen[1])**2)
+
             #Specific
-            diskrad = cp.sqrt((x-cen0)**2 + (y - cen1)**2)
+            diskrad = cp.sqrt((x - cen0)**2 + (y - cen1)**2)
+
             mask2[diskrad <= rad2] += 1. - (diskrad[diskrad <= rad2] / rad2)**2
 
 
@@ -175,13 +180,12 @@ class DataGenerator():
             self.object1 = mask1
             self.object2 = mask2
 
-    def make_data(self, parse=False):                                                                                      # Diffraction Patterns
+    def make_data(self, parse=False):   
         if self.object_sum == 0.:
             if parse:
                 self.parse_obj()
             else:
                 self.make_obj()
-
 
         if self.bg_count is not None:
             if parse:
@@ -271,13 +275,15 @@ class DataGenerator():
         #Fourier Models
         #O1
         model1 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object1)))
+        
         O1 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model1))))
-        np.save(op.join(self.output_folder,'O1.npy'),O1)
+        np.save(op.join(self.output_folder,'O1.npy'), O1)
         O1_intens = abs(model1)
         np.save(op.join(self.output_folder,'O1_intens.npy'), O1_intens)
         
         #O2
         model2 = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object2)))
+        
         O2 = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model2))))
         np.save(op.join(self.output_folder,'O2.npy'), O2)
         O2_intens = abs(model2)
@@ -297,30 +303,30 @@ class DataGenerator():
         # Diffraction Patterns 
         for i in range(self.num_data):
 
-            shifts2[i,0] = np.where(shifts2[i,0]>0.75, 8,8)
+            shifts2[i,0] = np.where(shifts2[i,0]>0.75, 8, 8)
+
+            #Discrete states A & B
             #if i % 2 == 0:
             #    model =  model1 + model2 * cp.exp(2 * cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,0])))
             #else:
+            #Homogeneous (A+B)/2
             model =  model1 + (np.fliplr(model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + (-3.7) * qy * shifts2[i,0]))))  
                                       + model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,0])))) / 2
 
             if i<5:
-                #Composite Objects
+                #Save Composite Object
                 composite_object = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model))))
                 np.save(op.join(self.output_folder,'composite_object_%.3d.npy'%i), composite_object)
-
                 composite_intens = abs(model.reshape(self.size,self.size))              
                 np.save(op.join(self.output_folder,'composite_intens_%.3d.npy'%i), composite_intens)
             
-
             #AuNP as Reference
-
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (model, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
             view *= (mask1.ravel() + mask2.ravel())
             view *= self.mean_count / view.sum()
 
-            if i < 5:
+            if i<5:
                 #Intensity with Reference attached
                 np.save(op.join(self.output_folder,'comp_intens_wRef_%.3d.npy'%i), view.reshape(self.size,self.size))
 
