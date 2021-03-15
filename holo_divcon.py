@@ -7,7 +7,7 @@ class HoloRecon():
     def __init__(self, size, shiftx, shifty, diameter, minrad=4, gen_data=True, apply_supp=True):
         self.size = size
         self.x, self.y, rad = self.get_rad(size)
-        mask = (rad>4) & (rad<92)                                                                            # Origin at Center : Circular Mask
+        mask = (rad>4) & (rad<92)
         if os.path.exists('holo_data.npz'):
             zfile = numpy.load('holo_data.npz')
             self.obj, self.init = cp.array(zfile['arr_0']), cp.array(zfile['arr_1'])
@@ -26,17 +26,15 @@ class HoloRecon():
         self.error = None
         self.curr = None
         
-        s = cp.pi * rad * diameter / size                                                                    # GOLD Sphere : Fourier
+        s = cp.pi * rad * diameter / size
         s[s==0] = 1.e-5
         self.sphere = (cp.sin(s) - s*cp.cos(s)) / s**3
 
         self.sx = shiftx
         self.sy = shifty
-        #self.spx = shiftpx
-        #self.spy = shiftpy
 
         if gen_data:
-            self.data = cp.array([cp.abs(fobj+1000*self.sphere*self.ramp(a,b)) for a, b in zip(self.sx, self.sy)])    # Object Intensity [Fourier]
+            self.data = cp.array([cp.abs(fobj+1000*self.sphere*self.ramp(a,b)) for a, b in zip(self.sx, self.sy)])
             self.data[:,self.invmask] = 0
 
     def run(self, func, niter):
@@ -55,29 +53,17 @@ class HoloRecon():
 
         size = self.size
 
-        # Protein 1(Static)
-        x1, y1 = cp.indices((size,size))
-        obj1 =  cp.zeros((size,size))
+        x, y = cp.indices((size,size))
+        obj =  cp.zeros((size,size))
         for _ in range(50):
-            cen1 = cp.random.random((2,))*size/5 + size//2*4/5
-            pixrad1 = cp.sqrt((x1-cen1[0])**2 + (y1-cen1[1])**2)
-            diskrad1 = (0.7 + 0.3*cp.random.random())*size/20
-            obj1[pixrad1<diskrad1] += 1. - (pixrad1[pixrad1<diskrad1]/diskrad1)**2
-
-        # Protein 2(Wobble)
-        #x2, y2 = cp.indices((size,size))
-        #obj2 =  cp.zeros((size,size))
-        #for _ in range(15):
-         #   cen2 = cp.random.random((2,))*size/10 + size//2*4/7
-          #  pixrad2 = cp.sqrt((x2-cen2[0])**2 + (y2-cen2[1])**2)
-           # diskrad2 = (0.7 + 0.3*cp.random.random())*size/20
-            #obj2[pixrad2<diskrad2] += 1. - (pixrad2[pixrad2<diskrad2]/diskrad2)**2
-
-        obj = obj1 #+ obj2 * cp.exp(2*cp.pi * 1j * (self.x*spx + self.y*spy))
+            cen = cp.random.random((2,))*size/5 + size//2*4/5
+            pixrad = cp.sqrt((x-cen[0])**2 + (y-cen[1])**2)
+            diskrad = (0.7 + 0.3*cp.random.random())*size/20
+            obj[pixrad<diskrad] += 1. - (pixrad[pixrad<diskrad]/diskrad)**2
 
         return obj
 
-    def ramp(self, sx, sy):                                                                                    # GOLD Sphere Ramp
+    def ramp(self, sx, sy):                         
         return cp.exp(1j*2.*cp.pi*(self.x*sx + self.y*sy)/self.size)
 
     @staticmethod
@@ -88,7 +74,7 @@ class HoloRecon():
         out.imag = vals[1]
         return out
 
-    def pc(self, x):                                                                                           # Project & Concurr
+    def pc(self, x):        
         avg = x.mean(0)
         if self.apply_supp:
             favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
@@ -96,7 +82,7 @@ class HoloRecon():
             avg = cp.fft.fftn(cp.fft.ifftshift(favg))
         return cp.broadcast_to(avg, x.shape)
 
-    def pd(self, x):                                                                                            # Project & Divide
+    def pd(self, x):
         N = len(x)
         out = cp.empty_like(x)
         for n in range(N):
