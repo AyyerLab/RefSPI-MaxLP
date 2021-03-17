@@ -313,7 +313,7 @@ class DataGenerator():
             model =  model1 + (np.fliplr(model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + (-3.7) * qy * shifts2[i,0]))))  
                                       + model2 * cp.exp( 2 * cp.pi * 1j * ((qx * shifts2[i,0] + qy * shifts2[i,0])))) / 2
 
-            if i<5:
+            if i < 5:
                 #Save Composite Object
                 composite_object = abs(cp.fft.ifftshift(cp.fft.ifftn(cp.fft.fftshift(model))))
                 np.save(op.join(self.output_folder,'composite_object_%.3d.npy'%i), composite_object)
