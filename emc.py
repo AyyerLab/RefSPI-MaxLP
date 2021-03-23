@@ -403,9 +403,10 @@ class EMC():
                 iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
+            
 
             dmodel = self.proj_concur(iter_curr)[0]
-            self.model = dmodel.get()     
+            self.model = dmodel.get()
 
             #Shrinkwrap
             if self.shrinkwrap == 1:
@@ -434,10 +435,10 @@ class EMC():
             if iternum is None:
                 np.save(op.join(self.output_folder, 'model.npy'), self.model)
             else:
-                np.save(op.join(self.output_folder, 'Rmodel_%.3d.npy'%iternum), self.model)
-                np.save(op.join(self.output_folder, 'Rintens_%.3d.npy'%iternum), intens.get())
-                np.save(op.join(self.output_folder, 'Rrmax_%.3d.npy'%iternum), self.rmax)
-                np.save(op.join(self.output_folder, 'Rinvsupp_%.3d.npy'%iternum), self.invsuppmask)
+                np.save(op.join(self.output_folder, 'model_%.3d.npy'%iternum), self.model)
+                np.save(op.join(self.output_folder, 'intens_%.3d.npy'%iternum), intens.get())
+                np.save(op.join(self.output_folder, 'rmax_%.3d.npy'%iternum), self.rmax)
+                np.save(op.join(self.output_folder, 'invsupp_%.3d.npy'%iternum), self.invsuppmask)
 
             self.model[self.invmask.get()] = 0
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
