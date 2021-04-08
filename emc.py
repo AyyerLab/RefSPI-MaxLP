@@ -131,7 +131,6 @@ class EMC():
         self.photons_file = op.join(op.dirname(config_file), config.get('emc', 'in_photons_file'))
         self.output_folder = op.join(op.dirname(config_file), config.get('emc', 'output_folder'))     
         self.log_file = op.join(op.dirname(config_file), config.get('emc', 'log_file'))                          
-        #self.true_support_file = op.join(op.dirname(config_file), config.get('emc', 'true_support_file'))
         self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))                                       
         self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
         self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))                
@@ -154,13 +153,13 @@ class EMC():
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
 
         #Invmask
-        self.invmask = cp.zeros(self.size**2, dtype=np.bool)
+        self.invmask = cp.zeros(self.size**2, dtype=cp.bool)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
         #Invsuppmask
-        self.invsuppmask = cp.ones((self.size,)*2, dtype=np.bool)
+        self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool)
         # Composite Object as Support
         if self.true_support == 1:
             composite_objectA = cp.load(self.true_support_fileA)
@@ -397,9 +396,9 @@ class EMC():
 
             #Divide and Concur
 
-            for i in range(1000):
+            for i in range(100):
                 iter_curr = self.er(iter_curr, fobs, iter_p1)
-            for i in range(1000):
+            for i in range(100):
                 iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
             #for i in range(50):
             #    iter_curr = self.er(iter_curr, fobs)
