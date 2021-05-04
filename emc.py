@@ -122,7 +122,6 @@ class EMC():
         self.support_area = config.getfloat('emc', 'support_area')
         self.shrink_support_area = config.getint('emc', 'shrink_support_area')
         self.one_square_support = config.getint('emc', 'one_square_support')
-        self.two_square_support = config.getint('emc', 'two_square_support')
         self.true_support = config.getint('emc', 'true_support')
         self.true_solution = config.getint('emc', 'true_solution')
 
@@ -135,7 +134,6 @@ class EMC():
         self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
         self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))                
          
-        #Scaling
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])                                      
@@ -161,20 +159,20 @@ class EMC():
         #Invsuppmask
         self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool)
         # Composite Object as Support
-        if self.true_support == 1:
-            composite_objectA = cp.load(self.true_support_fileA)
-            composite_objectB = cp.load(self.true_support_fileB)
-            composite_object =  composite_objectA + composite_objectB
-            self.invsuppmask = self.invsuppmask > composite_object
+        #if self.true_support == 1:
+        #    composite_objectA = cp.load(self.true_support_fileA)
+        #    composite_objectB = cp.load(self.true_support_fileB)
+        #    composite_object =  composite_objectA + composite_objectB
+        #    self.invsuppmask = self.invsuppmask > composite_object
 
         #Invsuppmask: One-Square Support
         if self.one_square_support == 1:
-            self.invsuppmask[140:195,140:195]  = False
+            self.invsuppmask[120:240,120:240]  = False
 
         #Invsuppmask: Two-Square Support
-        if self.two_square_support == 1:
-            self.invsuppmask[140:168,140,168]  = False
-            self.invsuppmask[168:195,168:195]  = False                                                                                                                                      
+        #if self.two_square_support == 1:
+        #    self.invsuppmask[140:168,140,168]  = False
+        #    self.invsuppmask[168:195,168:195]  = False                                                                                                                                      
 
 
         #Probmask
@@ -206,6 +204,14 @@ class EMC():
             if self.true_solution == 1:
                 #Object as model
                 true_model = np.load(self.true_solution_file)
+                #if model intensity
+                u, v = np.indices((385,385))
+                centr =385//2
+                r = np.sqrt((u-centr)**2 + (v-centr)**2)
+                true_model = true_model.reshape((385,385))
+                true_model[r>=centr]=0
+                true_model = abs(np.fft.ifftshift(np.fft.ifftn(np.fft.fftshift(true_model.reshape(385,385)))))
+
                 true_model[self.invsuppmask.get()] = 0
                 self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
             else:
@@ -393,23 +399,19 @@ class EMC():
             iter_curr[:,self.invmask] = 0       
             iter_p1 = cp.empty_like(iter_curr)
             
-
-            #Divide and Concur
-
-            for i in range(100):
-                iter_curr = self.er(iter_curr, fobs, iter_p1)
-            for i in range(100):
+            #for i in range(100):
+            #    iter_curr = self.er(iter_curr, fobs, iter_p1)
+            for i in range(200):
                 iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
-            #for i in range(50):
-            #    iter_curr = self.er(iter_curr, fobs)
-            
+            for i in range(200):
+                iter_curr = self.er(iter_curr, fobs, iter_p1)
 
             dmodel = self.proj_concur(iter_curr)[0]
             self.model = dmodel.get()
 
             #Shrinkwrap
             if self.shrinkwrap == 1:
-                if iternum < 5 or iternum % 5 == 0:                             
+                if iternum < 2 or iternum % 2 == 0:                             
                     amodel =np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(self.model.reshape((self.size,)*2)))))
 
             #ShrinkSigma
@@ -428,6 +430,10 @@ class EMC():
             #Shrink Support Area
                     if self.shrink_support_area == 0:
                         thresh = np.sort(famodel.ravel())[int((1 - self.support_area)*amodel.size)]
+                    if self.shrink_support_area == 1:
+                        area = (iternum - 1)/99
+                        supp_area = special.erfc(area)/10
+                        thresh = np.sort(famodel.ravel())[int((1 - supp_area)*amodel.size)]
 
                     self.invsuppmask = cp.array(famodel < thresh)
 
