@@ -20,7 +20,7 @@ class HoloRecon():
         self.invmask[rad<minrad] = True
         self.invmask[rad>=self.size//2] = True
         self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool)
-        self.invsuppmask[66:119,66:119] = False
+        self.invsuppmask[47:119,47:119] = False
         self.apply_supp = apply_supp
 
         self.error = None
@@ -50,7 +50,9 @@ class HoloRecon():
         return cp.array(self.error)
 
     def make_obj(self):
+
         size = self.size
+
         x, y = cp.indices((size,size))
         obj =  cp.zeros((size,size))
         for _ in range(50):
@@ -58,9 +60,10 @@ class HoloRecon():
             pixrad = cp.sqrt((x-cen[0])**2 + (y-cen[1])**2)
             diskrad = (0.7 + 0.3*cp.random.random())*size/20
             obj[pixrad<diskrad] += 1. - (pixrad[pixrad<diskrad]/diskrad)**2
+
         return obj
 
-    def ramp(self, sx, sy):
+    def ramp(self, sx, sy):                         
         return cp.exp(1j*2.*cp.pi*(self.x*sx + self.y*sy)/self.size)
 
     @staticmethod
@@ -71,7 +74,7 @@ class HoloRecon():
         out.imag = vals[1]
         return out
 
-    def pc(self, x):
+    def pc(self, x):        
         avg = x.mean(0)
         if self.apply_supp:
             favg = cp.fft.fftshift(cp.fft.ifftn(avg.reshape(self.size, self.size)))
@@ -107,8 +110,8 @@ class HoloRecon():
             return out
 
     def diffmap2(self, x, return_err=True): # beta = -1
-        p1 = pc(x)
-        out = x + pd(2*p1 - x) - p1
+        p1 = self.pc(x)
+        out = x + self.pd(2*p1 - x) - p1
         if return_err:
             err = cp.linalg.norm(out-x)
             return out, err
@@ -125,7 +128,7 @@ class HoloRecon():
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('num_iter', help='Number of iterations', type=int)
+    parser.add_argument('num_iter', help='Number of iterations', type=int, default= 100)
     parser.add_argument('-s', '--size', help='Array size', type=int, default=185)
     parser.add_argument('-d', '--diameter', help='Sphere diameter in pixels', type=float, default=7.)
     args = parser.parse_args()
