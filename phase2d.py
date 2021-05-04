@@ -36,7 +36,7 @@ class PhaseRecon():
 
         #Rotation and Background Subtraction
         self.fobj = cp.load(self.intensf)
-        self.fobj = cp.array(ndimage.rotate(self.fobj.get(), 2, reshape=False))
+        self.fobj = cp.array(ndimage.rotate(self.fobj.get(), 3, reshape=False))
         self.fobj = self.bgsubt(self.fobj)
         self.fobj = self.fobj**0.5
         self.fobj[self.invmask] = 0
