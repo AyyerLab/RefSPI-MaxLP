@@ -31,16 +31,6 @@ class Optimizer():
         Q = (self.photons * np.log(w) - w).sum()
         return Q
 
-    def obj_real_F(self, real_F, imag_F, rescale):
-        w = rescale * np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2
-        derv = (self.photons / w - 1) * 2 * rescale * (real_F + np.real(self.ref(self.disps)))
-        return -derv.sum()
-
-    def obj_imag_F(self, real_F, imag_F, rescale):
-        w = rescale * np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2
-        derv = (self.photons / w - 1) * 2 * rescale * (imag_F + np.imag(self.ref(self.disps)))
-        return -derv.sum()
-
     def obj_derv(self, real_F, imag_F, rescale):
         w = rescale * np.abs(real_F + 1j * imag_F +  self.ref(self.disps))**2
         p = (self.photons / w - 1) * 2 * rescale
