@@ -27,28 +27,24 @@ class Optimizer():
         Q = (self.photons * np.log(w) - w).sum()
         return -Q
 
-    def obj_real_F(self, real_F, imag_F, rescale):
+    def obj_derv(self, real_F, imag_F, rescale):
         w = rescale * np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2
-        derv = (self.photons / w - 1) * 2 * rescale * (real_F + np.real(self.ref(self.disps)))
-        return -derv.sum()
-
-    def obj_imag_F(self, real_F, imag_F, rescale):
-        w = rescale * np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2
-        derv = (self.photons / w - 1) * 2 * rescale * (imag_F + np.imag(self.ref(self.disps)))
-        return -derv.sum()
+        p = (self.photons / w - 1) * 2 * rescale
+        d_real = p * (real_F + np.real(self.ref(self.disps)))
+        d_imag = p * (imag_F + np.imag(self.ref(self.disps)))
+        return -d_real.sum(), -d_imag.sum()
+     
 
     def get_rescale(self, real_F, imag_F):
         return self.photons.mean()/(np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2).mean()
 
-    #mSGD
     def iterate(self, pars):
+        '''momentum based gradient descent'''
         real_F, imag_F, rescale = pars
 
-        d_real =  self.obj_real_F(*pars)
+        d_real, d_imag = self.obj_derv(*pars)
         self.vel_r = self.beta * self.vel_r + (1 - self.beta) * d_real 
-        
-        d_imag = self.obj_imag_F(*pars)
-        self.vel_i = self.beta * self.vel_i + (1 - self.beta) * d_imag  
+        self.vel_i = self.beta * self.vel_i + (1 - self.beta) * d_imag   
             
         real_F = real_F - self.lr * self.vel_r
         imag_F = imag_F - self.lr * self.vel_i

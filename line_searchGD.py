@@ -41,6 +41,14 @@ class Optimizer():
         derv = (self.photons / w - 1) * 2 * rescale * (imag_F + np.imag(self.ref(self.disps)))
         return -derv.sum()
 
+    def obj_derv(self, real_F, imag_F, rescale):
+        w = rescale * np.abs(real_F + 1j * imag_F +  self.ref(self.disps))**2
+        p = (self.photons / w - 1) * 2 * rescale
+        d_real = p * (real_F + np.real(self.ref(self.disps)))
+        d_imag = p * (imag_F + np.imag(self.ref(self.disps)))
+        return -d_real.sum(), -d_imag.sum()
+    
+
     def get_rescale(self, real_F, imag_F):
         return self.photons.mean()/(np.abs(real_F + 1j * imag_F + self.ref(self.disps))**2).mean()
     
@@ -74,17 +82,15 @@ class Optimizer():
             c = b - (b - a)/ self.phi
             d = a + (b - a)/ self.phi
 
-
         return (a+b)/2
 
-    #Linear Search GD
     def iterate(self, pars):
+        '''Line Search Gradient Descent'''
         real_F, imag_F, rescale = pars
 
-        d_real =  self.obj_real_F(*pars) 
-        d_imag = self.obj_imag_F(*pars)
-        
-        grad = d_real + 1j * d_imag  
+        d_real, d_imag  = self.obj_derv(*pars)
+        grad = d_real + 1j * d_imag
+
         F = real_F + 1j * imag_F
         alpha = self.gss(self.objective, F, grad, -1, 0)
 
