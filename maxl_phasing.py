@@ -74,7 +74,7 @@ class MaxLPhaser():
 
         return fobj_t + alpha * grad
 
-    def gss(self, func, fobj_t, grad, rescale, k_d, a, b, t, rel_tol=1.e-3):
+    def gss(self, func, fobj_t, grad, rescale, k_d, a, b, t, rel_tol=1.e-3, dyn_rescale = True):
         '''
         Pixel-wise golden-section maximization of func(fobj + alpha * grad) where alpha is between a and b
 
@@ -90,6 +90,12 @@ class MaxLPhaser():
 
         zc = fobj_t + c * grad
         zd = fobj_t + d * grad
+
+        if dyn_rescale = True:
+            rescale = get_rescale_pixel(fobjt, k_d, t)
+        else:
+            rescale  = rescale
+
         obj_c = func(zc, rescale, k_d, t)
         obj_d = func(zd, rescale, k_d, t)
 
