@@ -21,7 +21,7 @@ class MaxLPhaser():
     def _parse_data(self, data_fname, num_data):
         with h5py.File(data_fname, 'r') as fptr:
             self.sol = fptr['solution'][:]
-            self.angs = fptr['true_angles'][:]
+            angs = fptr['true_angles'][:]
             self.diams = fptr['true_diameters'][:]
             self.shifts = fptr['true_shifts'][:]
             ones, multi = fptr['ones'][:], fptr['multi'][:]
@@ -40,58 +40,66 @@ class MaxLPhaser():
         self.photons = (po_csr + pm_csr)[:self.num_data]
         self.photons_t = self.photons.transpose().tocsr()
 
-        self.rots = self._get_rot(self.angs).transpose(2, 0, 1)
-        self.angs *= 180. / np.pi # convert to degrees
+        # -angs maps from model space to detector space
+        # +angs maps from detector space to model space
+        self.rots = self._get_rot(-angs).transpose(2, 0, 1)
 
     def _get_qvals(self):
         ind = (np.arange(self.size, dtype='f4') - self.size//2) / self.size
         self.qx, self.qy = np.meshgrid(ind, ind, indexing='ij')
+        self.qx = self.qx.ravel()
+        self.qy = self.qy.ravel()
         self.qrad = np.sqrt(self.qx**2 + self.qy**2)
         self.qrad[self.qrad==0] = 1.e-6
 
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
         self.mask_ind = np.where(self.mask.ravel())[0]
 
-    def iterate_pixel(self, fobj, t, rel_tol=1.e-3):
-        rescale = self.get_rescale_pixel(fobj, t)
-        #print(rescale, self.get_logq_pixel(fobj, rescale, t))
+    def run_pixel(self, fobj, t, num_iter=10):
+        '''Optimize model for given model pixel t'''
+        fcurr = fobj.ravel()[t]
+        k_d = self.get_photons_pixel(t)
 
-        grad = self.get_grad_pixel(fobj, rescale, t)
-        alpha = self.gss(self.get_logq_pixel, fobj, grad, rescale, -1, 1, t, rel_tol=rel_tol)
+        for i in range(num_iter):
+            rescale = self.get_rescale_pixel(fcurr, k_d, t)
+            fcurr = self.iterate_pixel(fcurr, rescale, k_d, t)
 
         retval = fobj.copy()
-        retval[self.get_rel_pix(np.arange(self.num_data), t)] += alpha * grad
-        #print(grad, alpha)
+        retval.ravel()[t] = fcurr
         return retval
 
-    def gss(self, func, fobj, grad, rescale, a, b, t, rel_tol=1.e-3):
+    def iterate_pixel(self, fobj_t, rescale, k_d, t, rel_tol=1.e-3):
+        grad = self.get_grad_pixel(fobj_t, rescale, k_d, t)
+        alpha = self.gss(self.get_logq_pixel, fobj_t, grad, rescale, k_d, 0, 1, t, rel_tol=rel_tol)
+
+        return fobj_t + alpha * grad
+
+    def gss(self, func, fobj_t, grad, rescale, k_d, a, b, t, rel_tol=1.e-3):
         '''
         Pixel-wise golden-section maximization of func(fobj + alpha * grad) where alpha is between a and b
 
         Fixed rescale value is used during search
         Only relevant pixels to t are updated
         '''
+        #TODO: Use more efficient single call implementation
+        #TODO: Make option to use fixed or dynamic rescale
+        if a > b:
+            a, b = b, a
         c = b - (b - a) / PHI
         d = a + (b - a) / PHI
 
-        x, y = self.get_rel_pix(np.arange(self.num_data), t)
-        rel_pix = np.unique(x*self.size + y)
-        fobj_t = fobj.ravel()[rel_pix]
-        zc = fobj.copy()
-        zd = fobj.copy()
-
-        zc.ravel()[rel_pix] = fobj_t + c * grad
-        zd.ravel()[rel_pix] = fobj_t + d * grad
-        obj_c = func(zc, rescale, t)
-        obj_d = func(zd, rescale, t)
+        zc = fobj_t + c * grad
+        zd = fobj_t + d * grad
+        obj_c = func(zc, rescale, k_d, t)
+        obj_d = func(zd, rescale, k_d, t)
 
         niter = 1
-        tol = rel_tol * np.abs(fobj.ravel()[t]) / np.abs(grad)
+        tol = rel_tol * np.abs(fobj_t) / np.abs(grad)
         while np.abs(b-a) > tol:
-            zc.ravel()[rel_pix] = fobj_t + c * grad
-            zd.ravel()[rel_pix] = fobj_t + d * grad
-            obj_c = func(zc, rescale, t)
-            obj_d = func(zd, rescale, t)
+            zc = fobj_t + c * grad
+            zd = fobj_t + d * grad
+            obj_c = func(zc, rescale, k_d, t)
+            obj_d = func(zd, rescale, k_d, t)
 
             if obj_c > obj_d:
                 b = d
@@ -102,44 +110,55 @@ class MaxLPhaser():
             d = a + (b - a) / PHI
             niter += 1
 
-        #print('%d iteration line search: %f (%e < %e)' % (niter, (a+b)/2, np.abs(b-a), tol))
+        print('%d iteration line search: %f (%e < %e)' % (niter, (a+b)/2, np.abs(b-a), tol))
         return (a+b)/2
 
-    def get_fcalc_d(self, fobj, d_vals, t):
-        '''Get predicted intensities for frame list d_vals at pixel t'''
-        x, y = self.get_rel_pix(d_vals, t)
-
-        sval = np.pi * self.qrad[x, y] * self.diams[d_vals]
+    def get_fcalc_d(self, fobj_t, d_vals, t):
+        '''Get predicted intensities for frame list d_vals at model pixel t'''
+        sval = np.pi * self.qrad[t] * self.diams[d_vals]
         fref = (np.sin(sval) - sval*np.cos(sval)) / sval**3
-        ramp = np.exp(1j*2*np.pi*(self.qx[x,y]*self.shifts[d_vals, 0] + self.qy[x,y]*self.shifts[d_vals, 1]))
+        ramp = np.exp(1j*2*np.pi*(self.qx[t]*self.shifts[d_vals, 0] + self.qy[t]*self.shifts[d_vals, 1]))
 
-        return fobj[x, y] + fref*ramp
+        return fobj_t + fref*ramp
 
     def get_rel_pix(self, d_vals, t):
-        '''Get relevant pixels to generate fcalc with respect to given pixel t'''
-        tx, ty = np.unravel_index(t, (self.size, self.size))
-        rotpix = (self.rots[d_vals] @ np.array([self.qx[tx, ty], self.qy[tx, ty]]))*self.size + self.size//2
+        '''Get relevant pixels to sample data with respect to given model pixel t'''
+        rotpix = (self.rots[d_vals] @ np.array([self.qx[t], self.qy[t]]))*self.size + self.size//2
         x, y = np.rint(rotpix).astype('i4').T
-        return x, y
+        return x * self.size + y
 
-    def get_logq_pixel(self, fobj, rescale, t):
-        '''Calculate log-likelihood for given model and rescale at the given pixel'''
-        f_d = self.get_fcalc_d(fobj, np.arange(self.num_data), t)
+    def get_logq_pixel(self, fobj_t, rescale, k_d, t):
+        '''Calculate log-likelihood for given model and rescale at the given model pixel'''
+        f_d = self.get_fcalc_d(fobj_t, np.arange(self.num_data), t)
         w_d = rescale * np.abs(f_d)**2
-        return (self.photons_t[t].dot(np.log(w_d)) / self.num_data - w_d.mean())[0]
 
-    def get_grad_pixel(self, fobj, rescale, t):
+        return np.asarray(k_d.dot(np.log(w_d)))[0,0] / self.num_data - w_d.mean()
+
+    def get_grad_pixel(self, fobj_t, rescale, k_d, t):
         '''Generate pixel-wise complex gradients for given model and rescale at the given pixel'''
-        f_d = self.get_fcalc_d(fobj, np.arange(self.num_data), t)
-        return (self.photons_t[t].dot(2*f_d/np.abs(f_d)**2) / self.num_data - 2*rescale*f_d.mean())[0]
+        f_d = self.get_fcalc_d(fobj_t, np.arange(self.num_data), t)
 
-    def get_rescale_pixel(self, fobj, t):
+        return np.asarray(k_d.dot(2*f_d/np.abs(f_d)**2))[0,0] / self.num_data - 2*rescale*f_d.mean()
+
+    def get_rescale_pixel(self, fobj_t, k_d, t):
         '''Calculate rescale factor for given model at the given pixel'''
-        return self.photons_t[t].mean() / (np.abs(self.get_fcalc_d(fobj, np.arange(self.num_data), t))**2).mean()
+        f_d = self.get_fcalc_d(fobj_t, np.arange(self.num_data), t)
+
+        return k_d.mean() / (np.abs(f_d)**2).mean()
 
     def get_rescale_stochastic(self, fobj, npix=100):
         '''Calculate average rescale over npix random pixels'''
-        return np.array([self.get_rescale_pixel(fobj, t) for t in np.random.choice(self.mask_ind, npix, replace=False)]).mean()
+        rand_pix = np.random.choice(self.mask_ind, npix, replace=False)
+        vals = []
+        for t in rand_pix:
+            k_d = self.get_photons_pixel(t)
+            vals.append(self.get_rescale_pixel(fobj.ravel()[t], k_d, t))
+        return np.array(vals).mean()
+
+    def get_photons_pixel(self, t):
+        '''Obtains photons for each frame for a given model pixel t'''
+        t_vals = self.get_rel_pix(np.arange(self.num_data), t)
+        return self.photons_t[t_vals, np.arange(self.num_data)]
 
     def _get_rot(self, ang):
         c = np.cos(ang)
@@ -148,9 +167,11 @@ class MaxLPhaser():
 
     def get_fcalc_all(self, fobj, dia, shift):
         '''Get holographic combination of model and given spherical reference for all pixels'''
-        return fobj + self._get_sphere(dia) * np.exp(1j*2*np.pi*(self.qx*shift[0] + self.qy*shift[1]))
+        qx2d = self.qx.reshape((self.size,)*2)
+        qy2d = self.qy.reshape((self.size,)*2)
+        return fobj + self._get_sphere(dia) * np.exp(1j*2*np.pi*(qx2d*shift[0] + qy2d*shift[1]))
 
     def _get_sphere(self, dia):
         '''Get sphere transform for given diameter'''
-        sval = np.pi * self.qrad * dia
+        sval = np.pi * self.qrad.reshape((self.size,)*2) * dia
         return (np.sin(sval) - sval*np.cos(sval)) / sval**3
