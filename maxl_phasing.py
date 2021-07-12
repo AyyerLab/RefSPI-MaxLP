@@ -32,6 +32,12 @@ class MaxLPhaser():
 
         self.counts = np.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
+        self._gen_pattern(5)
+
+    def _gen_pattern(self, nmax):
+        ind = np.arange(-nmax, nmax+0.5, 1)
+        x, y = np.meshgrid(ind, ind, indexing='ij')
+        self.pattern = (x + 1j*y).ravel()
 
     def _parse_data(self, data_fname, num_data):
         with h5py.File(data_fname, 'r') as fptr:
@@ -107,6 +113,33 @@ class MaxLPhaser():
         fobj_t = fmag_t * phases[vals.argmax()]
         scale = self.gss_radial(fobj_t.item(), t, const, **kwargs)
         return fobj_t * scale
+
+    def run_pixel_pattern(self, fobj, t, num_iter=10, frac=None, **kwargs):
+        '''Optimize model for given model pixel t using pattern search'''
+        fobj_t = fobj.ravel()[t]
+        const = self.get_pixel_constants(t, frac=frac)
+        step = np.abs(fobj_t) / 5.
+
+        for i in range(num_iter):
+            fobj_t_new, step_new = self.iterate_pixel_pattern(fobj_t, t, step, None, const, **kwargs)
+            if step_new / np.abs(fobj_t_new) < 1.e-3:
+                break
+            fobj_t = fobj_t_new
+            step = step_new
+
+        return fobj_t
+
+    def iterate_pixel_pattern(self, fobj_t, t, step, rescale=None, const=None, **kwargs):
+        if const is None:
+            const = self.get_pixel_constants(t)
+
+        vals = self.get_logq_pixel(np.array(fobj_t+self.pattern*step), t, rescale=rescale, const=const)
+        imax = vals.argmax()
+        retf = fobj_t + self.pattern[imax] * step
+        if imax == self.pattern.size // 2: # Center of pattern
+            return retf, step / (self.pattern.size**0.5 / 2)
+        else:
+            return retf, step
 
     def gss(self, fobj_t, t, grad, rescale, const, 
             b=1, rel_tol=1.e-3, negative=False):
