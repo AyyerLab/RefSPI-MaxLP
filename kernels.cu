@@ -169,4 +169,17 @@ void proj_divide(const complex<double> *iter_in, const double *fobs, const compl
     }
 }
 
+__global__ 
+void get_f_dt(const complex<double> *fobj_t, const complex<double> *fref_d, 
+              const long long ndata, const long long npix, 
+              complex<double> *f_dt) {
+    long long d, t ;
+    d = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (d >= ndata)
+        return ;
+    
+    for (t = 0 ; t < npix ; ++t)
+        f_dt[d*npix + t] = fobj_t[t] + fref_d[d] ;
+}
+
 } // extern C
