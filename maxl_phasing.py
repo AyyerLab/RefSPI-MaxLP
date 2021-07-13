@@ -1,3 +1,4 @@
+import sys
 import numpy
 import h5py
 try:
@@ -80,6 +81,8 @@ class MaxLPhaser():
 
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
         self.mask_ind = np.where(self.mask.ravel())[0]
+        if CUPY:
+            self.mask_ind = self.mask_ind.get()
 
     def run_pixel(self, fobj, t, num_iter=10, frac=None, **kwargs):
         '''Optimize model for given model pixel t'''
@@ -114,14 +117,14 @@ class MaxLPhaser():
         scale = self.gss_radial(fobj_t.item(), t, const, **kwargs)
         return fobj_t * scale
 
-    def run_pixel_pattern(self, fobj, t, num_iter=10, frac=None, **kwargs):
+    def run_pixel_pattern(self, fobj, t, num_iter=10, rescale=None, frac=None, **kwargs):
         '''Optimize model for given model pixel t using pattern search'''
         fobj_t = fobj.ravel()[t]
         const = self.get_pixel_constants(t, frac=frac)
         step = np.abs(fobj_t) / 5.
 
         for i in range(num_iter):
-            fobj_t_new, step_new = self.iterate_pixel_pattern(fobj_t, t, step, None, const, **kwargs)
+            fobj_t_new, step_new = self.iterate_pixel_pattern(fobj_t, t, step, rescale, const, **kwargs)
             if step_new / np.abs(fobj_t_new) < 1.e-3:
                 break
             fobj_t = fobj_t_new
@@ -316,10 +319,10 @@ class MaxLPhaser():
 
     def get_rescale_stochastic(self, fobj, npix=100):
         '''Calculate average rescale over npix random pixels'''
-        rand_pix = np.random.choice(self.mask_ind, npix, replace=False)
+        rand_pix = numpy.random.choice(self.mask_ind, npix, replace=False)
         vals = np.empty(npix)
         for i, t in enumerate(rand_pix):
-            vals[i] = self.get_rescale_pixel(fobj.ravel()[t], t)
+            vals[i] = self.get_rescale_pixel(fobj.ravel()[t], t).item()
         return vals.mean()
 
     def get_fref_d(self, d_vals, t):
@@ -352,3 +355,26 @@ class MaxLPhaser():
         '''Get sphere transform for given diameter'''
         sval = np.pi * self.qrad.reshape((self.size,)*2) * dia
         return (np.sin(sval) - sval*np.cos(sval)) / sval**3
+
+def main():
+    if CUPY:
+        np.cuda.Device(1).use()
+    phaser = MaxLPhaser('data/holo_dia.h5')
+    size = phaser.size
+
+    rcurr = numpy.random.random((size, size))*(phaser.sol>1.e-4) * 7
+    fcurr = numpy.fft.fftshift(numpy.fft.fftn(numpy.fft.ifftshift(rcurr))) * 1.e-3
+    fconv = fcurr.copy().ravel()
+    for t in range(size**2):
+        if not phaser.mask[t]:
+            continue
+        #fconv[t] = phaser.run_pixel_pattern(fconv, t, num_iter=10)
+        fconv[t] = phaser.run_pixel_pattern(fconv, t, rescale=366.48, num_iter=10)
+        sys.stderr.write('\r%d/%d' % (t+1, size**2))
+    sys.stderr.write('\n')
+    fconv = fconv.reshape(fcurr.shape)
+    #numpy.save('data/maxl_recon.npy', fconv)
+    #numpy.save('data/maxl_recon_fixed.npy', fconv)
+
+if __name__ == '__main__':
+    main()
