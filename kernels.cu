@@ -169,17 +169,167 @@ void proj_divide(const complex<double> *iter_in, const double *fobs, const compl
     }
 }
 
-__global__ 
-void get_f_dt(const complex<double> *fobj_t, const complex<double> *fref_d, 
-              const long long ndata, const long long npix, 
+__global__
+void get_f_dt(const complex<double> *fobj_t, const complex<double> *fref_d,
+              const long long ndata, const long long npix,
               complex<double> *f_dt) {
     long long d, t ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
-    
+
     for (t = 0 ; t < npix ; ++t)
         f_dt[d*npix + t] = fobj_t[t] + fref_d[d] ;
+}
+
+__global__
+void get_logq_pixel(const complex<double> *fobj, const long long *pixels, const double rescale,
+                    const double *diams, const double *shifts, const double *qvals,
+					const int *indptr, const int *indices, const double *data,
+                    const long long ndata, const long long npix, double *logq_td) {
+    long long d, t ;
+    t = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (t >= npix)
+        return ;
+
+    long long pix = pixels[t] ;
+    double qx = qvals[pix*2 + 0], qy = qvals[pix*2 + 1] ;
+    double fobj_tx = fobj[pix].real(), fobj_ty = fobj[pix].imag() ;
+	int ind_st = indptr[pix], num_ind = indptr[pix+1] - ind_st ;
+	int ind_pos = 0 ;
+
+    double s, sphere_ft, w ;
+    double rampx, rampy ;
+
+    for (d = 0 ; d < ndata ; ++d) {
+        s = CUDART_PI * sqrt(qx*qx + qy*qy) * diams[d] ;
+        if (s == 0.)
+            s = 1.e-8 ;
+        sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
+        sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampy, &rampx) ;
+
+		w = rescale * (pow(fobj_tx + sphere_ft*rampx, 2.) + pow(fobj_ty + sphere_ft*rampy, 2.)) ;
+        logq_td[t*ndata + d] = -w ;
+
+		// Assuming sorted indices
+		// Assuming photon data is "rotated"
+		if (indices[ind_st + ind_pos] == d) {
+			logq_td[t*ndata + d] += data[ind_st + ind_pos] * log(w) ;
+			ind_pos++ ;
+		}
+
+		// Skipping when reaching end of frames indices
+		if (ind_pos > num_ind)
+			break ;
+    }
+}
+
+__device__
+bool isin(int *array, int length, int val) {
+    // array is assumed to be sorted
+    int lower = 0, upper = length, mid ;
+
+    if (array[lower] == val || array[upper] == val)
+        return true ;
+
+    while (lower < upper) {
+        mid = (lower + upper) / 2 ;
+        if (array[mid] == val)
+            return true ;
+        else if (array[mid] < val)
+            lower = mid + 1 ;
+        else
+            upper = mid ;
+    }
+
+    return false ;
+    // For non-sorted, brute force search
+    //for (i = 0 ; i < length ; ++i) {
+    //    if (array[i] == val) {
+    //        retval = 1 ;
+    //        break ;
+    //    }
+    //}
+    //return false ;
+}
+
+__global__
+void rotate_photons(const int *indptr, const double *angles,
+		            const long long ndata, const long long size,
+					int *indices) {
+    long long d ;
+    d = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (d >= ndata)
+        return ;
+
+	// indices and indptr are for ndata x npix CSR matrix (emc-like)
+	int ind_st = indptr[d], ind_en = indptr[d+1] ;
+	int t, pix ;
+	double tx, ty, rx, ry ;
+	int ints = size, cen = size / 2 ;
+	double c = cos(angles[d]), s = sin(angles[d]) ;
+    int ix, iy, pos[4], i ;
+
+	for (t = ind_st ; t < ind_en ; ++t) {
+		pix = indices[t] ;
+		tx = pix / size - cen ;
+		ty = pix % size - cen ;
+		rx = c*tx - s*ty ;
+		ry = s*tx + c*ty ;
+
+        ix = min(max(__double2int_rn(rx + cen), 0), ints - 1) ;
+        iy = min(max(__double2int_rn(ry + cen), 0), ints - 1) ;
+
+		// 0-th order interpolation
+		// Need trick to avoid repetition
+		//indices[t] = pos[0] ;
+		indices[t] = ix * size + iy ;
+	}
+
+}
+
+__global__
+void deduplicate(const int *indptr, const long long ndata,
+                 const long long size, int *indices) {
+    long long d ;
+    d = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (d >= ndata)
+        return ;
+
+	// indices and indptr are for ndata x npix CSR matrix (emc-like)
+	int ind_st = indptr[d], ind_en = indptr[d+1] ;
+	int t, pix, ix, iy, i ;
+    int pos[8] ;
+
+    for (t = ind_st ; t < ind_en ; ++t) {
+        pix = indices[t] ;
+
+        // Test whether previous index is common. If not, continue
+        if (t > ind_st && pix != indices[t-1])
+            continue ;
+
+        // Get neighbouring pixels
+        ix = pix / size ;
+        iy = pix % size ;
+        pos[0] = (ix-1) * size + iy-1 ;
+        pos[1] = (ix-1) * size + iy ;
+        pos[2] = (ix-1) * size + iy+1 ;
+        pos[3] = ix * size + iy-1 ;
+        pos[4] = ix * size + iy+1 ;
+        pos[5] = (ix+1) * size + iy-1 ;
+        pos[6] = (ix+1) * size + iy ;
+        pos[7] = (ix+1) * size + iy+1 ;
+
+        // Check if they exist and if not, assign to neighbouring pixel
+        for (i = 0 ; i < 8 ; ++i) {
+            if (pos[i] < 0 || pos[i] >= size*size)
+                continue ;
+            if (!isin(&indices[ind_st], ind_en-ind_st, pos[i])) {
+                indices[t] = pos[i] ;
+                break ;
+            }
+        }
+    }
 }
 
 } // extern C
