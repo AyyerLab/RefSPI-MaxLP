@@ -132,11 +132,11 @@ class EMC():
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
         sx = (float(s) for s in config.get('emc', 'shiftx').split())
         sy = (float(s) for s in config.get('emc', 'shifty').split())
+        self.num_stats = np.array([sx[-1], sy[-1], dia[-1]])
         self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(*sx), np.linspace(*sy), np.linspace(*dia), indexing='ij')
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
-        self.num_states = len(self.shiftx)
         print(self.num_states, 'sampled states')
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
@@ -174,7 +174,7 @@ class EMC():
         self.probmask[self.rad<4] = 2
 
         #Ramp * AuNP
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states)]
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states.prod())]
 
         #Fourier AuNP intensities
         self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
@@ -253,7 +253,7 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        self.num_states_p = np.arange(self.rank, self.num_states, self.num_proc).size
+        self.num_states_p = np.arange(self.rank, self.num_states.prod(), self.num_proc).size
         mem_frac = self.num_states_p*self.dset.num_data*8/ (self.mem_size - self.dset.mem)
         num_blocks = int(np.ceil(mem_frac / MEM_THRESH))
         block_sizes = np.array([self.dset.num_data // num_blocks] * num_blocks)
@@ -262,7 +262,7 @@ class EMC():
         if self.prob.shape != (self.num_states_p*self.num_rot, block_sizes.max()):
             self.prob = cp.empty((self.num_states_p*self.num_rot, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
-        intens = cp.empty((self.num_states, self.size**2), dtype='f8')
+        intens = cp.empty((self.num_states.prod(), self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -286,7 +286,7 @@ class EMC():
         msums = cp.empty(self.num_states_p)
         rot_views = cp.empty_like(views)
 
-        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -298,7 +298,7 @@ class EMC():
         cp.cuda.Stream().null.use()
         vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.num_states_p
 
-        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -322,6 +322,7 @@ class EMC():
         max_exp_p = self.prob.max(0).get()
         rmax_p = self.prob.argmax(axis=0).get().astype('i4')
         rmax_p = ((rmax_p//self.num_rot)*self.num_proc + self.rank)*self.num_rot + rmax_p%self.num_rot
+
         max_exp = np.empty_like(max_exp_p)
         self.rmax = np.empty_like(rmax_p)
 
@@ -339,7 +340,7 @@ class EMC():
         np.save(op.join(self.output_folder, 'prob.npy'), self.prob.get())
 
     def _update_model(self, intens, dmodel, drange):
-        p_norm = self.prob.reshape(self.num_states, self.num_rot, self.dset.num_data).sum((1,2))
+        p_norm = self.prob.reshape(self.num_states.prod(), self.num_rot, self.dset.num_data).sum((1,2))
         h_p_norm = p_norm.get()
         s = drange[0]
         e = drange[1]
@@ -348,7 +349,7 @@ class EMC():
         mweights = cp.zeros((self.num_streams,)+intens[0].shape)
         intens[:] = 0
 
-        for i, r in enumerate(range(self.rank, self.num_states, self.num_proc)):
+        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
             snum = i % self.num_streams
@@ -428,16 +429,27 @@ class EMC():
 
                     self.invsuppmask = cp.array(famodel < thresh)
 
-            if iternum is None:
-                np.save(op.join(self.output_folder, 'model.npy'), self.model)
-            else:
-                np.save(op.join(self.output_folder, 'model_%.3d.npy'%iternum), self.model)
-                np.save(op.join(self.output_folder, 'intens_%.3d.npy'%iternum), intens.get())
-                np.save(op.join(self.output_folder, 'rmax_%.3d.npy'%iternum), self.rmax)
-                np.save(op.join(self.output_folder, 'invsupp_%.3d.npy'%iternum), self.invsuppmask)
+            self.save_output(iternum, intens)
 
             self.model[self.invmask.get()] = 0
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
+
+    def save_output(self, iternum, intens=None):
+        if iternum is None:
+            np.save(op.join(self.output_folder, 'model.npy'), self.model)
+            return
+
+        with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
+            fptr['model'] = self.model
+            if intens is not None:
+                fptr['intens'] = intens.get()
+
+            sx, sy, dia, ang = np.unravel_index(self.rmax, tuple(self.num_states) + (self.num_rot,))
+            fptr['angles'] = ang
+            fptr['diameters'] = dia
+            fptr['shifts'] = np.array([sx, sy]).T
+
+            fptr['support'] = ~self.invsuppmask
 
     #Phase ramps of  AuNP
     def ramp(self, n):
@@ -454,7 +466,7 @@ class EMC():
         return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
 
     def proj_divide(self, iter_in, data, iter_out):
-        for n in range(self.num_states):
+        for n in range(self.num_states.prod()):
             snum = n % self.num_streams
             self.stream_list[snum].use()
 
