@@ -112,7 +112,7 @@ class MaxLPhaser():
                  self.num_data, len(pix), self.logq_td))
         return self.logq_td.mean(1)
 
-    def iterate_all(self, fobj, step, rescale=367.):
+    def iterate_all(self, fobj, step, rescale = 370.):
         if not self._photons_rotated:
             self._rotate_photons()
         pattern = cp.array([0,1+0j,0+1j,-1+0j,0-1j])
@@ -179,7 +179,7 @@ class MaxLPhaser():
         imax = vals.argmax()
         retf = fobj_t + self.pattern[imax] * step
         if imax == self.pattern.size // 2: # Center of pattern
-            return retf, step / (self.pattern.size**0.5 / 2)
+            return retf, step / (self.pattern.size**0.5 / 5)
         else:
             return retf, step
 
@@ -366,7 +366,7 @@ class MaxLPhaser():
     def get_photons_pixel(self, d_vals, t):
         '''Obtains photons for each frame for a given model pixel t'''
         if self._photons_rotated:
-            return self.photons_t[t, d_vals]
+            return self.photons_t[t, d_vals].toarray()
 
         rotpix = (self.rots[d_vals] @ cp.array([self.qx[t], self.qy[t]]))*self.size + self.size//2
         x, y = cp.rint(rotpix).astype('i4').T
@@ -390,8 +390,8 @@ class MaxLPhaser():
         return (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
 
 def main():
-    cp.cuda.Device(1).use()
-    phaser = MaxLPhaser('data/holo_dia.h5')
+    cp.cuda.Device(2).use()
+    phaser = MaxLPhaser('data/maxl/holo_dia.h5')
     size = phaser.size
 
     rcurr = np.random.random((size, size))*(phaser.sol>1.e-4) * 7
@@ -403,21 +403,21 @@ def main():
 
     cpix = 0
     stime = time.time()
-    for t in range(size**2 // 10):
+    for t in range(size**2):
         if not phaser.mask[t]:
             continue
         streams[cpix%num_streams].use()
-        #fconv[t] = phaser.run_pixel_pattern(fconv, t, num_iter=10)
-        fconv[t] = phaser.run_pixel_pattern(fconv, t, rescale=366.48, num_iter=10)
+        fconv[t] = phaser.run_pixel_pattern(fconv, t, num_iter=10)
+        #fconv[t] = phaser.run_pixel_pattern(fconv, t, rescale=366.48, num_iter=10)
         cpix += 1
         sys.stderr.write('\r%d/%d: %d %.4f Hz' % (t+1, size**2, cpix, cpix/(time.time()-stime)))
-        if cpix > 10:
-            break
+        #if cpix > 10:
+        #    break
     sys.stderr.write('\n')
     [s.synchronize() for s in streams]
 
     fconv = fconv.reshape(fcurr.shape)
-    #np.save('data/maxl_recon.cpy', fconv)
+    cp.save('data/maxl/maxl_recon.cpy', fconv)
     #np.save('data/maxl_recon_fixed.cpy', fconv)
 
 if __name__ == '__main__':
