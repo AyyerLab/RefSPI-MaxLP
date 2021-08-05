@@ -15,6 +15,8 @@ from mpi4py import MPI
 import cupy as cp
 from scipy import special
 
+import maxLP
+
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
 
@@ -112,32 +114,35 @@ class EMC():
 
         # Utilities
         self.shrinkwrap = config.getint('emc', 'shrinkwrap')
-        self.shrink_sigma = config.getint('emc', 'shrink_sigma')
+        #self.shrink_sigma = config.getint('emc', 'shrink_sigma')
         self.support_area = config.getfloat('emc', 'support_area')
-        self.shrink_support_area = config.getint('emc', 'shrink_support_area')
-        self.one_square_support = config.getint('emc', 'one_square_support')
-        self.true_support = config.getint('emc', 'true_support')
-        self.true_solution = config.getint('emc', 'true_solution')
+        #self.shrink_support_area = config.getint('emc', 'shrink_support_area')
+        #self.one_square_support = config.getint('emc', 'one_square_support')
+        #self.true_support = config.getint('emc', 'true_support')
+        #self.true_solution = config.getint('emc', 'true_solution')
 
         # Save & Get data
         self.photons_file = op.join(op.dirname(config_file), config.get('emc', 'in_photons_file'))
         self.output_folder = op.join(op.dirname(config_file), config.get('emc', 'output_folder'))
         self.log_file = op.join(op.dirname(config_file), config.get('emc', 'log_file'))
-        self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))
-        self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
-        self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))
+        #self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))
+        #self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
+        #self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
-        sx = (float(s) for s in config.get('emc', 'shiftx').split())
-        sy = (float(s) for s in config.get('emc', 'shifty').split())
-        self.num_stats = np.array([sx[-1], sy[-1], dia[-1]])
-        self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(*sx), np.linspace(*sy), np.linspace(*dia), indexing='ij')
+        sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
+        sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
+        self.num_states = np.array([sx[-1], sy[-1], dia[-1]])
+        self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(sx[0], sx[1], int(sx[2])), 
+                                                                np.linspace(sy[0], sy[1], int(sy[2])), np.linspace(dia[0], dia[1], int(dia[2])), indexing='ij')
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
-        print(self.num_states, 'sampled states')
+        #self.num_states = len(self.shiftx)
+
+        print(self.num_states.prod(), 'sampled states')
         self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
         self.x_ind = self.x_ind.ravel() - self.size // 2
         self.y_ind = self.y_ind.ravel() - self.size // 2
@@ -159,8 +164,8 @@ class EMC():
         #    self.invsuppmask = self.invsuppmask > composite_object
 
         #Invsuppmask: One-Square Support
-        if self.one_square_support == 1:
-            self.invsuppmask[120:240,120:240]  = False
+        #if self.one_square_support == 1:
+        self.invsuppmask[66:119,66:119]  = False
 
         #Invsuppmask: Two-Square Support
         #if self.two_square_support == 1:
@@ -174,7 +179,7 @@ class EMC():
         self.probmask[self.rad<4] = 2
 
         #Ramp * AuNP
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(self.num_states.prod())]
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.num_states.prod()))]
 
         #Fourier AuNP intensities
         self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
@@ -193,24 +198,24 @@ class EMC():
         if self.rank == 0:
 
         #True Solution
-            if self.true_solution == 1:
-                #Object as model
-                true_model = np.load(self.true_solution_file)
-                #if model intensity
-                u, v = np.indices((385,385))
-                centr =385//2
-                r = np.sqrt((u-centr)**2 + (v-centr)**2)
-                true_model = true_model.reshape((385,385))
-                true_model[r>=centr]=0
-                true_model = abs(np.fft.ifftshift(np.fft.ifftn(np.fft.fftshift(true_model.reshape(385,385)))))
+            #if self.true_solution == 1:
+            #    #Object as model
+            #    true_model = np.load(self.true_solution_file)
+            #    #if model intensity
+            #    u, v = np.indices((385,385))
+            #    centr =385//2
+            #    r = np.sqrt((u-centr)**2 + (v-centr)**2)
+            #    true_model = true_model.reshape((385,385))
+            #    true_model[r>=centr]=0
+            #    true_model = abs(np.fft.ifftshift(np.fft.ifftn(np.fft.fftshift(true_model.reshape(385,385)))))
 
-                true_model[self.invsuppmask.get()] = 0
-                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
-            else:
+            #    true_model[self.invsuppmask.get()] = 0
+            #    self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(true_model))).flatten()
+            #else:
                 #Random noise as model
-                rmodel = np.random.random((self.size,)*2)
-                rmodel[self.invsuppmask.get()] = 0
-                self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
+            rmodel = np.random.random((self.size,)*2)
+            rmodel[self.invsuppmask.get()] = 0
+            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
 
             self.model /= 2.e3
 
@@ -262,7 +267,7 @@ class EMC():
         if self.prob.shape != (self.num_states_p*self.num_rot, block_sizes.max()):
             self.prob = cp.empty((self.num_states_p*self.num_rot, block_sizes.max()), dtype='f8')
         views = cp.empty((self.num_streams, self.size**2), dtype='f8')
-        intens = cp.empty((self.num_states.prod(), self.size**2), dtype='f8')
+        intens = cp.empty((int(self.num_states.prod()), self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -286,7 +291,7 @@ class EMC():
         msums = cp.empty(self.num_states_p)
         rot_views = cp.empty_like(views)
 
-        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
+        for i, r in enumerate(range(self.rank, int(self.num_states.prod()), self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -298,7 +303,7 @@ class EMC():
         cp.cuda.Stream().null.use()
         vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.num_states_p
 
-        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
+        for i, r in enumerate(range(self.rank, int(self.num_states.prod()), self.num_proc)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -340,7 +345,7 @@ class EMC():
         np.save(op.join(self.output_folder, 'prob.npy'), self.prob.get())
 
     def _update_model(self, intens, dmodel, drange):
-        p_norm = self.prob.reshape(self.num_states.prod(), self.num_rot, self.dset.num_data).sum((1,2))
+        p_norm = self.prob.reshape(int(self.num_states.prod()), self.num_rot, self.dset.num_data).sum((1,2))
         h_p_norm = p_norm.get()
         s = drange[0]
         e = drange[1]
@@ -349,7 +354,7 @@ class EMC():
         mweights = cp.zeros((self.num_streams,)+intens[0].shape)
         intens[:] = 0
 
-        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
+        for i, r in enumerate(range(self.rank, int(self.num_states.prod()), self.num_proc)):
             if h_p_norm[i] == 0.:
                 continue
             snum = i % self.num_streams
@@ -386,19 +391,45 @@ class EMC():
             fobs = cp.sqrt(intens * mscale)
             print('mscale =', mscale)
 
-            iter_curr = cp.empty(intens.shape, dtype='c16')
+            #Run Maximum-Likelihood Phaser(Pixel Pattern or iterate all)
+            iter_curr = cp.empty(intens.shape, dtype = 'c16')
             iter_curr[:] = dmodel.ravel()
-            iter_curr[:,self.invmask] = 0
-            iter_p1 = cp.empty_like(iter_curr)
+            iter_curr[:, self.invmask] = 0
+            print(iter_curr.shape)
+            
+            sx, sy, dia, ang = np.unravel_index(self.rmax, tuple(self.num_states.astype(int)) + (self.num_rot,))
+            dataMaxL = maxLP.MaxLData(self.photons_file)
+            phaser = maxLP.MaxLPhaser(sx, sy, dia, ang, dataMaxL)
+            streams = [cp.cuda.Stream() for _ in range(self.num_streams)] 
+            cpix = 0
+            stime = time.time()
+            for t in range (self.size**2):
+                if not phaser.mask[t]:
+                    continue
+                streams[cpix%self.num_streams].use()
+                iter_curr[t] = phaser.run_pixel_pattern(iter_curr, t, num_iter=10)
+                cpix += 1
+                sys.stderr.write('\r%d/%d: %d %.4f Hz' % (t+1, phaser.size**2, cpix, cpix/(time.time()-stime)))
+
+            sys.stderr.write('\n')
+            [s.synchronize() for s in streams]
+            
+            dmodel = iter_curr
+
+            #Run Difference Map
+            #iter_curr = cp.empty(intens.shape, dtype='c16')
+            #iter_curr[:] = dmodel.ravel()
+            #iter_curr[:,self.invmask] = 0
+            #iter_p1 = cp.empty_like(iter_curr)
 
             #for i in range(100):
             #    iter_curr = self.er(iter_curr, fobs, iter_p1)
-            for i in range(200):
-                iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
-            for i in range(200):
-                iter_curr = self.er(iter_curr, fobs, iter_p1)
+            #for i in range(200):
+            #    iter_curr = self.diffmap(iter_curr, fobs, iter_p1)
+            #for i in range(200):
+            #    iter_curr = self.er(iter_curr, fobs, iter_p1)
 
-            dmodel = self.proj_concur(iter_curr)[0]
+            #dmodel = self.proj_concur(iter_curr)[0]
             self.model = dmodel.get()
 
             #Shrinkwrap
@@ -444,7 +475,7 @@ class EMC():
             if intens is not None:
                 fptr['intens'] = intens.get()
 
-            sx, sy, dia, ang = np.unravel_index(self.rmax, tuple(self.num_states) + (self.num_rot,))
+            sx, sy, dia, ang = np.unravel_index(self.rmax, tuple(self.num_states.astype(int)) + (self.num_rot,))
             fptr['angles'] = ang
             fptr['diameters'] = dia
             fptr['shifts'] = np.array([sx, sy]).T
@@ -523,7 +554,10 @@ def main():
             print('Rank %d: %s (Device %d)' % (rank, socket.gethostname(), dev))
             sys.stdout.flush()
             cp.cuda.Device(dev).use()
-
+    
+    #Maximum-Likelihood based Phase Retrieval
+    #dataMaxL = maxLP.MaxLData('data/emcM/holo.h5')
+    #Run EMC
     recon = EMC(args.config_file, num_streams=args.streams)
 
     logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
