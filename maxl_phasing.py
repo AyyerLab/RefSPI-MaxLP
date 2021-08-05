@@ -25,7 +25,7 @@ class MaxLPhaser():
 
         self.counts = cp.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
-        self._gen_pattern(5)
+        self._gen_pattern(12)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
 
@@ -100,6 +100,12 @@ class MaxLPhaser():
         self.qrad[self.qrad==0] = 1.e-6
 
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
+        #ring mask for first rescale estimate
+        self.rmask = (self.qrad > 33/self.size) & (self.qrad < 0.19)
+        #ring mask for second rescale estomate, closer to low q
+        self.nmask = (self.qrad > 23/self.size) & (self.qrad < 0.14)
+        #mask containing bad pixel region in low q
+        self.bmask = (self.qrad > 4/self.size) & (self.qrad < 0.1)
         self.mask_ind = cp.where(self.mask.ravel())[0]
 
     def get_qcurr(self, fobj, rescale):
@@ -112,10 +118,21 @@ class MaxLPhaser():
                  self.num_data, len(pix), self.logq_td))
         return self.logq_td.mean(1)
 
-    def iterate_all(self, fobj, step, rescale = 370.):
+    def get_pixel_constants(self, t , frac=None):
+        if frac is None:
+            d_vals = cp.arange(self.num_data)
+        else:
+             d_vals = cp.random.choice(self.num_data, int(cp.round(self.num_data*frac)), replace=False)
+        
+        return {'k_d': self.get_photons_pixel(d_vals, t),
+                'fref_d': self.get_fref_d(d_vals, t)}
+
+    def iterate_all(self, fobj, step, rescale, nmax=2):
         if not self._photons_rotated:
             self._rotate_photons()
-        pattern = cp.array([0,1+0j,0+1j,-1+0j,0-1j])
+        ind = cp.arange(-nmax, nmax+0.5, 1)
+        x, y = cp.meshgrid(ind, ind, indexing='ij')
+        pattern = (x+1j*y).ravel()
         fpatt = cp.array([fobj + step*p for p in pattern])
         qpatt = cp.array([self.get_qcurr(f, rescale) for f in fpatt])
         pind = qpatt.argmax(0)
@@ -124,7 +141,7 @@ class MaxLPhaser():
         return fobj, step
 
     def run_pixel(self, fobj, t, num_iter=10, frac=None, **kwargs):
-        '''Optimize model for given model pixel t'''
+        '''Optimize model for given model pixel t using iterate_pixel func()'''
         fobj_t = fobj.ravel()[t]
         const = self.get_pixel_constants(t, frac=frac)
 
@@ -136,16 +153,9 @@ class MaxLPhaser():
 
         return fobj_t
 
-    def get_pixel_constants(self, t, frac=None):
-        if frac is None:
-            d_vals = cp.arange(self.num_data)
-        else:
-            d_vals = cp.random.choice(self.num_data, int(cp.round(self.num_data*frac)), replace=False)
-
-        return {'k_d': self.get_photons_pixel(d_vals, t),
-                'fref_d': self.get_fref_d(d_vals, t)}
 
     def iterate_pixel(self, fobj_t, t, rescale=None, const=None, **kwargs):
+        '''Optimize for given model pixel t using Golden Section Search on phase and magnitude'''
         if const is None:
             const = self.get_pixel_constants(t)
 
@@ -160,7 +170,7 @@ class MaxLPhaser():
         '''Optimize model for given model pixel t using pattern search'''
         fobj_t = fobj.ravel()[t]
         const = self.get_pixel_constants(t, frac=frac)
-        step = cp.abs(fobj_t) / 5.
+        step = cp.abs(fobj_t) / 4.
 
         for i in range(num_iter):
             fobj_t_new, step_new = self.iterate_pixel_pattern(fobj_t, t, step, rescale, const, **kwargs)
@@ -191,7 +201,6 @@ class MaxLPhaser():
 
         Setting rescale=None means dynamic rescale for each point, else fixed
         '''
-        #TODO: Use more efficient single call implementation
         a = 0
         if a > b:
             a, b = b, a
