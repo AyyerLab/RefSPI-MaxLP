@@ -7,33 +7,21 @@ import cupy as cp
 from cupyx.scipy import sparse
 from cupyx.scipy import ndimage
 
-PHI = (np.sqrt(5) + 1) / 2.
-INVPHI = 1. / PHI
-INVPHI2 = 1. / PHI**2
-
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood methods'''
-    def __init__(self, sx, sy, dia, ang, data_class):
-        self.angs = cp.array(ang)
-        self.diams = cp.array(dia)
-        self.shifts = cp.array([sx, sy]).T
+    def __init__(self, data_fname, num_data=-1):
         self.size = 185
-        self.num_data = data_class.num_data
         self._load_kernels()
+        self._parse_data(data_fname, num_data)
         self._get_qvals()
         self._rot_kwargs = {'reshape': False, 'order': 1, 'prefilter': False}
         self._photons_rotated = False
-        self.photons = data_class.photons
 
         self.counts = cp.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
-        self._gen_pattern(5)
+        self._gen_pattern(8)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
-        
-        # -angs maps from model space to detector space
-        # +angs maps from detector space to model space
-        self.rots = self._get_rot(-self.angs).transpose(2, 0, 1)
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -44,26 +32,34 @@ class MaxLPhaser():
         self.k_deduplicate = kernels.get_function('deduplicate')
 
     def _gen_pattern(self, nmax):
-        ind = cp.arange(-nmax, nmax+0.5, 1)
+        ind = cp.arange(-nmax, nmax+0.5, 0.5)
         x, y = cp.meshgrid(ind, ind, indexing='ij')
         self.pattern = (x + 1j*y).ravel()
 
-    def _rotate_photons(self):
-        fshape = (self.size,) * 2
+    def _parse_data(self, data_fname, num_data):
+        with h5py.File(data_fname, 'r') as fptr:
+            ones, multi = fptr['ones'][:], fptr['multi'][:]
+            po, pm, cm = fptr['place_ones'][:], fptr['place_multi'][:], fptr['count_multi'][:] # pylint: disable=invalid-name
 
-        sframes = []
-        for d in range(self.num_data):
-            sframes.append(sparse.csr_matrix(cp.rint(ndimage.rotate(self.photons[d].toarray().reshape(fshape),
-                           self.angs[d]*180/cp.pi, order=1, reshape=False)).ravel()))
-            if (d+1)%10 == 0:
-                sys.stderr.write('\rRotating photons...%.3f%%'%((d+1)/self.num_data*100.))
-                sys.stderr.flush()
+        self.size = 185
+        if num_data < 0:
+            self.num_data = len(ones)
+        else:
+            self.num_data = num_data
 
-        self.photons = sparse.vstack(sframes, format='csr')
+        po_all = cp.hstack(po)
+        po_csr = sparse.csr_matrix((cp.ones_like(po_all, dtype='f8'),
+                                    cp.array(po_all),
+                                    cp.concatenate((cp.array([0]), cp.cumsum(cp.array(ones))), axis=0)
+                                   ), shape=(len(po), self.size**2))
+        pm_csr = sparse.csr_matrix((cp.hstack(cm).astype('f8'),
+                                    cp.hstack(pm),
+                                    cp.concatenate((cp.array([0]), cp.cumsum(cp.array(multi))), axis=0)
+                                   ), shape=(len(pm), self.size**2))
+
+        self.photons = (po_csr + pm_csr)[:self.num_data]
         self.photons_t = self.photons.transpose().tocsr()
-        self._photons_rotated = True
-        sys.stderr.write('\rRotating photons...done    \n')
-        sys.stderr.flush()
+
 
     def _get_qvals(self):
         ind = (cp.arange(self.size, dtype='f8') - self.size//2) / self.size
@@ -74,6 +70,12 @@ class MaxLPhaser():
         self.qrad[self.qrad==0] = 1.e-6
 
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
+        #ring mask for first rescale estimate
+        self.rmask = (self.qrad > 33/self.size) & (self.qrad < 0.19)
+        #ring mask for second rescale estomate, closer to low q
+        self.nmask = (self.qrad > 23/self.size) & (self.qrad < 0.14)
+        #mask containing bad pixel region in low q
+        self.bmask = (self.qrad > 4/self.size) & (self.qrad < 0.1)
         self.mask_ind = cp.where(self.mask.ravel())[0]
 
     def get_qcurr(self, fobj, rescale):
@@ -88,18 +90,19 @@ class MaxLPhaser():
 
     def get_pixel_constants(self, t , frac=None):
         if frac is None:
-           d_vals = cp.arange(self.num_data)
+            d_vals = cp.arange(self.num_data)
         else:
-           d_vals = cp.random.choice(self.num_data, int(cp.round(self.num_data*frac)), replace=False)
+             d_vals = cp.random.choice(self.num_data, int(cp.round(self.num_data*frac)), replace=False)
         
         return {'k_d': self.get_photons_pixel(d_vals, t),
                 'fref_d': self.get_fref_d(d_vals, t)}
 
-    def iterate_all(self, fobj, step, rescale):
+    def iterate_all(self, fobj, step, rescale, nmax=2):
         if not self._photons_rotated:
             self._rotate_photons()
-        pattern = cp.array([0,1+0j,0+1j,-1+0j,0-1j])
-        #pattern = self._gen_pattern(5)
+        ind = cp.arange(-nmax, nmax+0.5, 1)
+        x, y = cp.meshgrid(ind, ind, indexing='ij')
+        pattern = (x+1j*y).ravel()
         fpatt = cp.array([fobj + step*p for p in pattern])
         qpatt = cp.array([self.get_qcurr(f, rescale) for f in fpatt])
         pind = qpatt.argmax(0)
@@ -137,7 +140,7 @@ class MaxLPhaser():
         '''Optimize model for given model pixel t using pattern search'''
         fobj_t = fobj.ravel()[t]
         const = self.get_pixel_constants(t, frac=frac)
-        step = cp.abs(fobj_t) / 5.
+        step = cp.abs(fobj_t) / 4.
 
         for i in range(num_iter):
             fobj_t_new, step_new = self.iterate_pixel_pattern(fobj_t, t, step, rescale, const, **kwargs)
@@ -159,121 +162,6 @@ class MaxLPhaser():
             return retf, step / (self.pattern.size**0.5 / 5)
         else:
             return retf, step
-
-    def gss(self, fobj_t, t, grad, rescale, const,
-            b=1, rel_tol=1.e-3, negative=False):
-        '''
-        Pixel-wise golden-section maximization of
-        logq_pixel(fobj + alpha * grad) where alpha is between a and b
-
-        Setting rescale=None means dynamic rescale for each point, else fixed
-        '''
-        #TODO: Use more efficient single call implementation
-        a = 0
-        if a > b:
-            a, b = b, a
-
-        if const is None:
-            const = self.get_pixel_constants(t)
-
-        if negative:
-            def neg_func(fobj_t, t, rescale, const):
-                return -self.get_logq_pixel(fobj_t, t, rescale, const)
-            func = neg_func
-        else:
-            func = self.get_logq_pixel
-
-        c = b - (b - a) / PHI
-        d = a + (b - a) / PHI
-
-        zc = fobj_t + c * grad
-        zd = fobj_t + d * grad
-
-        if rescale is None:
-            obj_c = func(zc, t, self.get_rescale_pixel(zc, t, const), const)
-            obj_d = func(zd, t, self.get_rescale_pixel(zd, t, const), const)
-        else:
-            obj_c = func(zc, t, rescale, const)
-            obj_d = func(zd, t, rescale, const)
-
-        if obj_c < obj_d :
-            b = self.gss(fobj_t, t, grad, rescale, const,
-                         b=b, rel_tol=rel_tol, negative=True)
-
-            c = b - (b - a) / PHI
-            d = a + (b - a) / PHI
-
-        niter = 1
-        tol = rel_tol * cp.abs(fobj_t) / cp.abs(grad)
-        while cp.abs(b-a) > tol:
-            zc = fobj_t + c * grad
-            zd = fobj_t + d * grad
-            if rescale is None:
-                obj_c = func(zc, t, self.get_rescale_pixel(zc, t, const), const)
-                obj_d = func(zd, t, self.get_rescale_pixel(zd, t, const), const)
-            else:
-                obj_c = func(zc, t, rescale, const)
-                obj_d = func(zd, t, rescale, const)
-
-            if obj_c > obj_d:
-                b = d
-            else:
-                a = c
-
-            c = b - (b - a) / PHI
-            d = a + (b - a) / PHI
-            niter += 1
-
-        #print('%d iteration line search: %f (%e < %e)' % (niter, (a+b)/2, cp.abs(b-a), tol))
-        return (a+b)/2
-
-    def gss_radial(self, fobj_t, t, const, b=2, tol=1.e-5):
-        '''
-        Pixel-wise golden-section maximization of
-        logq_pixel(alpha * fobj) where alpha is between a and b
-
-        Dynamic rescale only
-        '''
-        a = 0
-
-        if const is None:
-            const = self.get_pixel_constants(t)
-        func = self.get_logq_pixel
-
-        h = b - a
-        c = a + h * INVPHI2
-        d = a + h * INVPHI
-
-        zc = c * fobj_t
-        zd = d * fobj_t
-        obj_c = func(zc, t, self.get_rescale_pixel(zc, t, const), const)
-        obj_d = func(zd, t, self.get_rescale_pixel(zd, t, const), const)
-
-        niter = 1
-        while cp.abs(b-a) > tol:
-            h *= INVPHI
-            if obj_c > obj_d:
-                b = d
-                d = c
-                obj_d = obj_c
-                c = a + INVPHI2 * h
-                zc = c * fobj_t
-                obj_c = func(zc, t, self.get_rescale_pixel(zc, t, const), const)
-            else:
-                a = c
-                c = d
-                obj_c = obj_d
-                d = a + INVPHI * h
-                zd = d * fobj_t
-                obj_d = func(zd, t, self.get_rescale_pixel(zd, t, const), const)
-
-            niter += 1
-
-        #print('%d iteration line search: %f (%e < %e)' % (niter, (a+b)/2, cp.abs(b-a), tol))
-        if obj_c > obj_d:
-            return (a + d) / 2
-        else:
-            return (b + c)/2
 
     def get_logq_pixel(self, fobj_t, t, rescale=None, const=None):
         '''Calculate log-likelihood for given model and rescale at the given model pixel'''
@@ -321,7 +209,7 @@ class MaxLPhaser():
         f_dt = cp.zeros((len(const['fref_d']), len(fobj_t)), dtype='c16')
         bsize = int(cp.ceil(len(const['fref_d'])/32.))
         self.k_get_f_dt((bsize,), (32,), (fobj_t, const['fref_d'], len(const['fref_d']), len(fobj_t), f_dt))
-
+       
         return const['k_d'].mean() / (cp.abs(f_dt)**2).mean(0)
 
     def get_rescale_stochastic(self, fobj, cpix=100):
@@ -337,7 +225,6 @@ class MaxLPhaser():
         sval = cp.pi * self.qrad[t] * self.diams[d_vals]
         fref = (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
         ramp = cp.exp(1j*2*cp.pi*(self.qx[t]*self.shifts[d_vals, 0] + self.qy[t]*self.shifts[d_vals, 1]))
-
         return fref*ramp
 
     def get_photons_pixel(self, d_vals, t):
@@ -350,6 +237,11 @@ class MaxLPhaser():
         t_vals = x * self.size + y
         return self.photons[d_vals, t_vals]
 
+    def _get_rot(self, ang):
+        c = cp.cos(ang)
+        s = cp.sin(ang)
+        return cp.array([[c, -s], [s, c]])
+
     def get_fcalc_all(self, fobj, dia, shift):
         '''Get holographic combination of model and given spherical reference for all pixels'''
         qx2d = self.qx.reshape((self.size,)*2)
@@ -361,45 +253,38 @@ class MaxLPhaser():
         sval = cp.pi * self.qrad.reshape((self.size,)*2) * dia
         return (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
 
-    def _get_rot(self, ang):
-        c = cp.cos(ang)
-        s = cp.sin(ang)
-        return cp.array([[c, -s], [s, c]])
 
-class MaxLData:
-    '''Parses sparse photons dataser from HdF5 file''' 
-    def __init__(self, photons_file, num_data =-1):
-       self.photons_file = photons_file
-       self._parse_data(self.photons_file, num_data)
-   
-    def _parse_data(self, data_fname, num_data):
-         with h5py.File(data_fname, 'r') as fptr:
-             ones, multi = fptr['ones'][:], fptr['multi'][:]
-             po, pm, cm = fptr['place_ones'][:], fptr['place_multi'][:], fptr['count_multi'][:] # pylint: disable=invalid-name
+    def _run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
+        fconv = model.copy().ravel()
+        self.shifts = cp.array([sx_vals, sy_vals]).T
+        self.diams = cp.array(dia_vals)
+        self.ang = cp.array(ang_vals)
+        # -angs maps from model space to detector space
+        # +angs maps from detector space to model space
+        self.rots = self._get_rot(-self.ang).transpose(2, 0, 1)
+        
+        num_streams = 4
+        streams = [cp.cuda.Stream() for _ in range(num_streams)]
+        
+        print('Starting Phaser...')
+        for t in range(self.size**2):
+            if not self.rmask[t]:
+                continue
+            fconv[t] = self.run_pixel_pattern(fconv, t, num_iter=10)
 
-         self.size = 185
-         if num_data < 0:
-             self.num_data = len(ones)
-         else:
-             self.num_data = num_data
 
-         po_all = cp.hstack(po)
-         po_csr = sparse.csr_matrix((cp.ones_like(po_all, dtype='f8'),
-                                     cp.array(po_all),
-                                     cp.concatenate((cp.array([0]), cp.cumsum(cp.array(ones))), axis=0)
-                                    ), shape=(len(po), self.size**2))
-         pm_csr = sparse.csr_matrix((cp.hstack(cm).astype('f8'),
-                                     cp.hstack(pm),
-                                     cp.concatenate((cp.array([0]), cp.cumsum(cp.array(multi))), axis=0)
-                                    ), shape=(len(pm), self.size**2))
- 
-         self.photons = (po_csr + pm_csr)[:self.num_data]
-         self.photons_t = self.photons.transpose().tocsr()
+        rescales = np.zeros(self.size**2)
+        for t in range(self.size**2):
+            if not self.rmask[t]:
+                continue
+            rescales[t] = self.get_rescale_pixel(fconv[t], t)
+        rescale = np.mean(rescales[self.rmask.get()])
+        print('Estimated rescale:', rescale)
 
-         # -angs maps from model space to detector space
-         # +angs maps from detector space to model space
+        for t in range(self.size**2):
+            if not self.mask[t]:
+                continue
+            fconv[t] = self.run_pixel_pattern(fconv, t, rescale = rescale, num_iter=10)
+        print('Phasing done..')
 
-    def _get_rot(self, ang):
-        c = cp.cos(ang)
-        s = cp.sin(ang)
-        return cp.array([[c, -s], [s, c]])
+        return fconv
