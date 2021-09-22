@@ -75,7 +75,7 @@ class FRC():
 
         return np.arange(rsize, dtype='f8') * binsize, fsc
 
-    def calc_rot(self, binsize=1., num_rot=180, do_abs=False, angle=None):
+    def calc_rot(self, binsize=1., num_rot=1800, do_abs=False, angle=None, radmin=0):
         '''Calculate best FRC with rotated versions of obj2
 
         Parameters;
@@ -104,8 +104,8 @@ class FRC():
                                             order=1, prefilter=False, reshape=False)
 
             rvals, ccvals = self.calc(binsize=binsize, do_abs=do_abs, rsize=rsize, fobj2=rotfmodel)
-            if ccvals[:cen].mean() > max_cc:
-                max_cc = ccvals[:cen].mean()
+            if ccvals[radmin:cen].mean() > max_cc:
+                max_cc = ccvals[radmin:cen].mean()
                 rmax = r
                 fvals = ccvals
             if self.verbose:
