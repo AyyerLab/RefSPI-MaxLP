@@ -6,6 +6,7 @@ import numpy as np
 import cupy as cp
 from cupyx.scipy import sparse
 from cupyx.scipy import ndimage
+import itertools
 
 PHI = (np.sqrt(5) + 1) / 2.
 INVPHI = 1. / PHI
@@ -25,7 +26,7 @@ class MaxLPhaser():
 
         self.counts = cp.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
-        self._gen_pattern(12)
+        self._gen_pattern(8)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
 
@@ -38,16 +39,79 @@ class MaxLPhaser():
         self.k_deduplicate = kernels.get_function('deduplicate')
 
     def _gen_pattern(self, nmax):
-        ind = cp.arange(-nmax, nmax+0.5, 1)
+        ind = cp.arange(-nmax, nmax+0.5, 0.5)
         x, y = cp.meshgrid(ind, ind, indexing='ij')
         self.pattern = (x + 1j*y).ravel()
+    
+    def _bin_params(self, params, linspace):
+        bin_params = cp.zeros(len(params))
+        
+        amin = (linspace[0] + linspace[1])*0.5
+        for j in range(len(params)):
+           if params[j] <= amin:
+              bin_params[j] = linspace[0]
 
-    def _parse_data(self, data_fname, num_data):
+        amax = (linspace[len(linspace)-2] + linspace[len(linspace)-1])*0.5
+        for j in range(len(params)):
+           if params[j] >= amax:
+              bin_params[j] = linspace[len(linspace)-1]
+
+        for i in range(len(linspace)-2):
+            m_a = (linspace[i] + linspace[i+1])*0.5
+            m_b = (linspace[i+1] + linspace[i+2])*0.5
+            for j in range(len(params)):
+               if params[j] >= m_a and params[j] <= m_b:
+                   bin_params[j] = linspace[i+1]
+
+        return bin_params  
+          
+    def _wrap_angles(self, angles):
+        wrap_angles = cp.zeros(len(angles))
+        for i in range(len(angles)):
+            while angles[i] > cp.pi:
+                angles[i] -= 2*cp.pi
+            while angles[i] <-cp.pi:
+                angles[i] += 2*cp.pi
+            wrap_angles[i] = cp.where(angles[i]<0, np.pi + angles[i], angles[i]) 
+        
+        return wrap_angles
+
+    def _get_states(self, sx_linspace, sy_linspace, dia_linspace):
+        sxsy = list(itertools.product(sx_linspace, sy_linspace))
+        states = list(itertools.product(sxsy, dia_linspace))
+        sampled_states = np.zeros((len(states), 3), dtype = np.float64)
+        for i in range(len(states)):
+            sampled_states[i][0] = states[i][0][0]
+            sampled_states[i][1] = states[i][0][1]
+            sampled_states[i][2] = states[i][1]
+       
+        return sampled_states
+
+    def _get_prob(self, sampled_states, shifts, diams):
+        xshifts = shifts[:,0]
+        yshifts = shifts[:,1]
+        prob_m = np.zeros((len(sampled_states), len(shifts)))
+        for i in range(len(shifts)):
+            for j in range(len(sampled_states)):
+                if sampled_states[j][0]==xshifts[i] and sampled_states[j][1]==yshifts[i] and sampled_states[j][2]==diams[j]:
+                    prob_m[j,i] = 1
+        return prob_m
+
+    def _parse_data(self, data_fname, num_data, binning = False):
         with h5py.File(data_fname, 'r') as fptr:
             self.sol = fptr['solution'][:]
             self.angs = cp.array(fptr['true_angles'][:])
             self.diams = cp.array(fptr['true_diameters'][:])
             self.shifts = cp.array(fptr['true_shifts'][:])
+            if binning is True:
+               shift_linspace = np.linspace(-2.5, 2.5, 6)
+               dia_linspace = np.linspace(6, 8, 5)
+               ang_linspace = np.linspace(0, np.pi, 90)
+               shiftx = self._bin_params(self.shifts[:,0], shift_linspace)
+               shifty = self._bin_params(self.shifts[:,1], shift_linspace)
+               self.shifts = cp.array([shiftx, shifty]).T
+               self.diams = self._bin_params(self.diams, dia_linspace)
+               self.angs = self._bin_params(self._wrap_angles(self.angs), ang_linspace)
             ones, multi = fptr['ones'][:], fptr['multi'][:]
             po, pm, cm = fptr['place_ones'][:], fptr['place_multi'][:], fptr['count_multi'][:] # pylint: disable=invalid-name
 
@@ -69,10 +133,6 @@ class MaxLPhaser():
 
         self.photons = (po_csr + pm_csr)[:self.num_data]
         self.photons_t = self.photons.transpose().tocsr()
-
-        # -angs maps from model space to detector space
-        # +angs maps from detector space to model space
-        self.rots = self._get_rot(-self.angs).transpose(2, 0, 1)
 
     def _rotate_photons(self):
         fshape = (self.size,) * 2
@@ -376,7 +436,11 @@ class MaxLPhaser():
         '''Obtains photons for each frame for a given model pixel t'''
         if self._photons_rotated:
             return self.photons_t[t, d_vals].toarray()
-
+        
+        # -angs maps from model space to detector space
+        # +angs maps from detector space to model space
+        self.rots = self._get_rot(-self.angs).transpose(2, 0, 1)
+        
         rotpix = (self.rots[d_vals] @ cp.array([self.qx[t], self.qy[t]]))*self.size + self.size//2
         x, y = cp.rint(rotpix).astype('i4').T
         t_vals = x * self.size + y
@@ -403,10 +467,11 @@ def main():
     phaser = MaxLPhaser('data/maxl/holo_dia.h5')
     size = phaser.size
 
-    rcurr = np.random.random((size, size))*(phaser.sol>1.e-4) * 7
-    fcurr = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rcurr))) * 1.e-3
-    fconv = fcurr.copy().ravel()
-
+    #rcurr = np.random.random((size, size))*(phaser.sol>1.e-4) * 7
+    #fcurr = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rcurr))) * 1.e-3
+    fcurr = np.random.random(size**2) + 1j*np.random.random(size**2)
+    #fconv = fcurr.copy().ravel()
+    fconv = fcurr.copy()
     num_streams = 4
     streams = [cp.cuda.Stream() for _ in range(num_streams)]
 
