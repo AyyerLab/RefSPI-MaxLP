@@ -271,6 +271,7 @@ class MaxLPhaser():
             if not self.rmask[t]:
                 continue
             fconv[t] = self.run_pixel_pattern(fconv, t, num_iter=10)
+        print('Calculated for pixel annulus')
 
 
         rescales = np.zeros(self.size**2)
@@ -285,6 +286,8 @@ class MaxLPhaser():
             if not self.mask[t]:
                 continue
             fconv[t] = self.run_pixel_pattern(fconv, t, rescale = rescale, num_iter=10)
+            sys.stderr.write('\r%d/%d'%(t+1, self.size**2))
+        sys.stderr.write('\n')
         print('Phasing done..')
 
         return fconv
