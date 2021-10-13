@@ -97,7 +97,7 @@ class MaxLPhaser():
                     prob_m[j,i] = 1
         return prob_m
 
-    def _parse_data(self, data_fname, num_data, binning = False):
+    def _parse_data(self, data_fname, num_data, binning = True):
         with h5py.File(data_fname, 'r') as fptr:
             self.sol = fptr['solution'][:]
             self.angs = cp.array(fptr['true_angles'][:])
@@ -469,7 +469,7 @@ def main():
 
     #rcurr = np.random.random((size, size))*(phaser.sol>1.e-4) * 7
     #fcurr = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rcurr))) * 1.e-3
-    fcurr = np.random.random(size**2) + 1j*np.random.random(size**2)
+    fcurr = 2*(np.random.random(size**2) + 1j*np.random.random(size**2)) - 1 
     #fconv = fcurr.copy().ravel()
     fconv = fcurr.copy()
     num_streams = 4
