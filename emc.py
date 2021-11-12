@@ -108,7 +108,7 @@ class EMC():
         config = configparser.ConfigParser()
         config.read(config_file)
 
-        self.size = config.getint('parameters', 'size')
+        self.size = config.getint('emc', 'size')
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')
         self.support_area = config.getfloat('emc', 'support_area')
@@ -120,12 +120,8 @@ class EMC():
                                 config.get('emc', 'log_file'))
 
         use_true_sol = config.getboolean('emc', 'use_true_solution', fallback=False)
-
-        #self.true_solution_file = op.join(op.dirname(config_file), config.get('emc', 'true_solution_file'))
         use_true_supp = config.getboolean('emc', 'use_true_support', fallback=False)
-        #self.true_support_file = op.join(op.dirname(config_file), config.get('emc', 'true_support_file'))
-        #self.true_support_fileA = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileA'))
-        #self.true_support_fileB = op.join(op.dirname(config_file), config.get('emc', 'true_support_fileB'))
+        self.true_support = op.join(op.dirname(config_file), config.get('emc', 'true_support_file'))
 
         self.use_phaser = False
         self.use_divcon = False
@@ -137,7 +133,6 @@ class EMC():
         elif phasing_type == 'divcon':
             self.use_divcon = True
 
-        self.phaser_shrinkwrap = config.getboolean('emc', 'phaser_shrinkwrap')
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
         self.decrease_sigma = config.getboolean('emc', 'decrease_sigma', fallback=False)
         self.decrease_supp_area = config.getboolean('emc', 'decrease_supp_area', fallback=False)
@@ -149,6 +144,7 @@ class EMC():
         self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(sx[0], sx[1], int(sx[2])),
                                                                 np.linspace(sy[0], sy[1], int(sy[2])),
                                                                 np.linspace(dia[0], dia[1], int(dia[2])), indexing='ij')
+
         self.shiftx = self.shiftx.ravel()
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
@@ -165,8 +161,13 @@ class EMC():
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
-        self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
-        self.invsuppmask[58:108,58:108]  = False
+        if use_true_supp:
+            self.invsuppmask = cp.load(self.true_support)
+        elif phasing_type == 'mlp':
+            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+        elif phasing_type == 'divcon':
+            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+            self.invsuppmask[58:108,58:108]  = False
 
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
@@ -188,7 +189,6 @@ class EMC():
 
         if self.rank == 0:
             self._random_model(true_sol=use_true_sol)
-            #self.model[self.invmask.get()]=0
             np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
         if self.need_scaling:
@@ -208,6 +208,7 @@ class EMC():
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
+
 
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMC algorithm
@@ -233,8 +234,9 @@ class EMC():
         if self.use_phaser:
             sx_vals, sy_vals, dia_vals, ang_vals = self.unravel_rmax(self.rmax)
             self.model = self.phaser._run_phaser(self.model, sx_vals, sy_vals, dia_vals, ang_vals)
-            if self.phaser_shrinkwrap:
-                self.shrinkwrap(self.model, iternum)
+            #if iternum  > 70 :
+            #    self.model, self.invsuppmask = self.phaser._improve_model(self.model)
+            
         elif self.use_divcon:
             self._update_model(intens, dmodel)
             self._normalize_model(intens, dmodel, iternum)
@@ -391,7 +393,7 @@ class EMC():
             famodel = ndimage.gaussian_filter(amodel, sigma)
             if self.decrease_supp_area:
                 a = (iternum-1)/99
-                supp_area = special.erfc(a)/10
+                supp_area = 0.1 + special.erfc(a)/20
                 thresh = np.sort(famodel.ravel())[int((1-supp_area)*amodel.size)]
             else:
                 thresh = np.sort(famodel.ravel())[int((1- self.support_area)*amodel.size)]
@@ -474,8 +476,8 @@ def main():
     parser = argparse.ArgumentParser(description='In-plane rotation EMC')
     parser.add_argument('num_iter', type=int,
                         help='Number of iterations')
-    parser.add_argument('-c', '--config_file', default='config.ini',
-                        help='Path to configuration file (default: config.ini)')
+    parser.add_argument('-c', '--config_file', default='emc_config.ini',
+                        help='Path to configuration file (default: emc_config.ini)')
     parser.add_argument('-d', '--devices', default = 'device.txt',
                         help='Path to devices file')
     parser.add_argument('-s', '--streams', type=int, default=4,
