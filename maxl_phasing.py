@@ -6,6 +6,7 @@ import numpy as np
 import cupy as cp
 from cupyx.scipy import sparse
 from cupyx.scipy import ndimage
+from scipy import special
 import itertools
 
 PHI = (np.sqrt(5) + 1) / 2.
@@ -29,6 +30,17 @@ class MaxLPhaser():
         self._gen_pattern(8)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
+
+        self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
+        self.x_ind = self.x_ind.ravel() - self.size//2
+        self.y_ind = self.y_ind.ravel() - self.size//2
+        self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
+        
+        self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+
+        self.invmask = cp.ones(self.size**2, dtype=cp.bool_)
+        self.invmask[self.rad<4] = False
+        self.invmask[self.rad>=self.size//2] = False
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -76,7 +88,7 @@ class MaxLPhaser():
         
         return wrap_angles
 
-    def _get_states(self, sx_linspace, sy_linspace, dia_linspace):
+    def _get_states(self, sx_linspace, sy_linspace, dia_linspace, angs_linspace, with_angs=True):
         sxsy = list(itertools.product(sx_linspace, sy_linspace))
         states = list(itertools.product(sxsy, dia_linspace))
         sampled_states = np.zeros((len(states), 3), dtype = np.float64)
@@ -84,7 +96,15 @@ class MaxLPhaser():
             sampled_states[i][0] = states[i][0][0]
             sampled_states[i][1] = states[i][0][1]
             sampled_states[i][2] = states[i][1]
-       
+        if with_angs is True:
+            astates = list(itertools.product(sampled_states, angs_linspace))
+            fsampled_states = np.zeros((len(astates), 4), dtype = np.float64)
+            for i in range(len(astates)):
+                fsampled_states[i][0] = astates[i][0][0]
+                fsampled_states[i][1] = astates[i][0][1]
+                fsampled_states[i][2] = astates[i][0][2]
+                fsampled_states[i][3] = astates[i][1]
+            sampled_states = fsampled_states 
         return sampled_states
 
     def _get_prob(self, sampled_states, shifts, diams):
@@ -97,9 +117,14 @@ class MaxLPhaser():
                     prob_m[j,i] = 1
         return prob_m
 
-    def _parse_data(self, data_fname, num_data, binning = True):
+    def _parse_data(self, data_fname, num_data, binning = False, hetro=True):
         with h5py.File(data_fname, 'r') as fptr:
-            self.sol = fptr['solution'][:]
+            if hetro is True:
+                self.sol1 = fptr['solution'][:]
+                self.sol2 = fptr['wobble'][:]
+                self.sol = self.sol1 + self.sol2
+            else:
+                self.sol = fptr['solution'][:]
             self.angs = cp.array(fptr['true_angles'][:])
             self.diams = cp.array(fptr['true_diameters'][:])
             self.shifts = cp.array(fptr['true_shifts'][:])
@@ -151,7 +176,7 @@ class MaxLPhaser():
         sys.stderr.write('\rRotating photons...done    \n')
         sys.stderr.flush()
 
-    def _get_qvals(self):
+    def _get_qvals(self, hetro=True):
         ind = (cp.arange(self.size, dtype='f8') - self.size//2) / self.size
         self.qx, self.qy = cp.meshgrid(ind, ind, indexing='ij')
         self.qx = self.qx.ravel()
@@ -162,11 +187,10 @@ class MaxLPhaser():
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
         #ring mask for first rescale estimate
         self.rmask = (self.qrad > 33/self.size) & (self.qrad < 0.19)
-        #ring mask for second rescale estomate, closer to low q
-        self.nmask = (self.qrad > 23/self.size) & (self.qrad < 0.14)
-        #mask containing bad pixel region in low q
-        self.bmask = (self.qrad > 4/self.size) & (self.qrad < 0.1)
         self.mask_ind = cp.where(self.mask.ravel())[0]
+        if hetro is True:
+            #ring mask for first rescale estimate(hetro case)
+            self.brmask = (self.qrad > 76/self.size) & (self.qrad < 0.20)
 
     def get_qcurr(self, fobj, rescale):
         if not self._photons_rotated:
@@ -212,7 +236,6 @@ class MaxLPhaser():
             fobj_t = fobj_t_new
 
         return fobj_t
-
 
     def iterate_pixel(self, fobj_t, t, rescale=None, const=None, **kwargs):
         '''Optimize for given model pixel t using Golden Section Search on phase and magnitude'''
@@ -462,6 +485,37 @@ class MaxLPhaser():
         sval = cp.pi * self.qrad.reshape((self.size,)*2) * dia
         return (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
 
+    def proj_real(self, x):
+        rmodel = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(x.reshape(self.size, self.size))))
+        rmodel[self.invsuppmask.get()] = 0
+        return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).ravel()
+
+    def proj_fourier(self, fconv, x): 
+        out = x.copy()
+        out[self.invmask.get()] = fconv[self.invmask.get()]
+        return out
+
+    def er(self, fconv, x):
+        out = self.proj_real(self.proj_fourier(fconv, x))
+        err = np.linalg.norm(out - x)
+        print('Error:', err)
+        return out
+
+    def diffmap(self, fconv, x):
+        p1 = self.proj_fourier(fconv, x)
+        out = x + self.proj_real(2*p1 - x) - p1
+        err = np.linalg.norm(out - x)
+        print('Error:', err)
+        return out
+
+    def _get_support(self, fconv):
+        smask = special.expit((self.rad.get().reshape(self.size, self.size) - 12)*0.5)
+        rsupp = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fconv.reshape(self.size, self.size)*smask))))
+        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.e-4
+        suppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+        suppmask = suppmask > grsupp
+        return suppmask
+     
 def main():
     cp.cuda.Device(2).use()
     phaser = MaxLPhaser('data/maxl/holo_dia.h5')
