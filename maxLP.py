@@ -6,6 +6,7 @@ import numpy as np
 import cupy as cp
 from cupyx.scipy import sparse
 from cupyx.scipy import ndimage
+from scipy import special
 
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood methods'''
@@ -22,6 +23,15 @@ class MaxLPhaser():
         self._gen_pattern(8)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
+
+        self.px_ind, self.py_ind = cp.indices((self.size,)*2, dtype='f8')
+        self.px_ind = self.px_ind.ravel() - self.size//2
+        self.py_ind = self.py_ind.ravel() - self.size//2
+        self.prad = cp.sqrt(self.px_ind**2 + self.py_ind**2)
+        self.pinvsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+        self.pinvmask = cp.ones(self.size**2, dtype=cp.bool_)
+        self.pinvmask[self.prad<4] = False
+        self.pinvmask[self.prad>=self.size//2]=False
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -253,6 +263,32 @@ class MaxLPhaser():
         sval = cp.pi * self.qrad.reshape((self.size,)*2) * dia
         return (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
 
+    def proj_fourier(self, fconv, x):
+        out = x.copy()
+        out[self.pinvmask.get()] = fconv[self.pinvmask.get()]
+        return out
+
+    def proj_real(self, x):
+        rmodel = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(x.reshape(self.size, self.size))))
+        rmodel[self.pinvsuppmask.get()] = 0
+        return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).ravel()
+
+    def er(self, fconv, x):
+        out = self.proj_real(self.proj_fourier(fconv, x))
+        return out
+
+    def diffmap(self, fconv, x):
+        p1 = self.proj_fourier(fconv, x)
+        out = x + self.proj_real(2*p1 - x) -p1
+        return out
+
+    def _get_support(self, fconv):
+        smask = special.expit((self.prad.get().reshape(self.size, self.size) - 12)*0.5)
+        rsupp = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fconv.reshape(self.size, self.size)*smask))))
+        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.e-4
+        suppmask = cp.ones((self.size,)*2, dtype = cp.bool_)
+        suppmask = suppmask > grsupp
+        return suppmask
 
     def _run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
         fconv = model.copy().ravel()
@@ -291,3 +327,17 @@ class MaxLPhaser():
         print('Phasing done..')
 
         return fconv
+
+    def _improve_model(self, fconv, update_supp=False):
+        print('Starting diffmap and er')
+        fout = fconv.copy()
+        if update_supp is True:
+            self.pinvsuppmask = self._get_support(fconv.reshape(self.size, self.size))
+        for i in range(10):
+            fout = self.diffmap(fconv, fout)
+        for i in range(5):
+            fout = self.er(fconv, fout)
+
+        #fout[self.prad.get()>92] = 0 
+        print('Done...')
+        return fout, self.pinvsuppmask
