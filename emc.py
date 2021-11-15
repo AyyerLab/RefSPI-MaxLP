@@ -234,8 +234,6 @@ class EMC():
         if self.use_phaser:
             sx_vals, sy_vals, dia_vals, ang_vals = self.unravel_rmax(self.rmax)
             self.model = self.phaser._run_phaser(self.model, sx_vals, sy_vals, dia_vals, ang_vals)
-            #if iternum  > 70 :
-            #    self.model, self.invsuppmask = self.phaser._improve_model(self.model)
             
         elif self.use_divcon:
             self._update_model(intens, dmodel)
@@ -426,8 +424,7 @@ class EMC():
             self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
             self.model /= 2.e3
         elif self.use_phaser:
-            self.model = 2*(np.random.random(self.size**2) + 1j*np.random.random(self.size**2)) - 1
-            self.model /= 2.e3
+            self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
