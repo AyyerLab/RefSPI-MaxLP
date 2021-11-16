@@ -311,7 +311,7 @@ class DataGenerator():
                 fmodel =  model + wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0])))
            
             if i <=5 :
-                np.save('data/md/model_%.3d.npy'%i, fmodel) 
+                np.save('data/hetro/model_blur_%.3d.npy'%i, fmodel) 
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (fmodel, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
 
