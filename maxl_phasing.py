@@ -117,12 +117,12 @@ class MaxLPhaser():
                     prob_m[j,i] = 1
         return prob_m
 
-    def _parse_data(self, data_fname, num_data, binning = False, hetro=True):
+    def _parse_data(self, data_fname, num_data, binning = False, hetro=False):
         with h5py.File(data_fname, 'r') as fptr:
             if hetro is True:
-                self.sol1 = fptr['solution'][:]
-                self.sol2 = fptr['wobble'][:]
-                self.sol = self.sol1 + self.sol2
+                self.rigid = fptr['rigid'][:]
+                self.wobble = fptr['wobble'][:]
+                self.sol = self.rigid + self.wobble
             else:
                 self.sol = fptr['solution'][:]
             self.angs = cp.array(fptr['true_angles'][:])
@@ -176,7 +176,7 @@ class MaxLPhaser():
         sys.stderr.write('\rRotating photons...done    \n')
         sys.stderr.flush()
 
-    def _get_qvals(self, hetro=True):
+    def _get_qvals(self,):
         ind = (cp.arange(self.size, dtype='f8') - self.size//2) / self.size
         self.qx, self.qy = cp.meshgrid(ind, ind, indexing='ij')
         self.qx = self.qx.ravel()
@@ -188,9 +188,7 @@ class MaxLPhaser():
         #ring mask for first rescale estimate
         self.rmask = (self.qrad > 33/self.size) & (self.qrad < 0.19)
         self.mask_ind = cp.where(self.mask.ravel())[0]
-        if hetro is True:
-            #ring mask for first rescale estimate(hetro case)
-            self.brmask = (self.qrad > 76/self.size) & (self.qrad < 0.20)
+
 
     def get_qcurr(self, fobj, rescale):
         if not self._photons_rotated:
