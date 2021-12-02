@@ -509,7 +509,7 @@ class MaxLPhaser():
     def _get_support(self, fconv):
         smask = special.expit((self.rad.get().reshape(self.size, self.size) - 12)*0.5)
         rsupp = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fconv.reshape(self.size, self.size)*smask))))
-        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.e-4
+        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.2e-4
         suppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
         suppmask = suppmask > grsupp
         return suppmask
