@@ -43,7 +43,7 @@ class DataGenerator():
         self.gen_iso = False
         object_type = config.get('make_data', 'object_type', fallback='mix')
         if object_type not in ['iso','homo', 'mix', 'blur']:
-            raise ValueError('Data type needs to be from (homo, mix,or blur')
+            raise ValueError('Object type needs to be from (iso, homo, mix or blur')
         elif object_type == 'homo':
             self.gen_homo = True
         elif object_type == 'mix':
@@ -279,10 +279,6 @@ class DataGenerator():
         model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))   
         if self.object_hetro:
             wobble_model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.wobble_object)))
- 
-        #Blurred O2 in Composite Object
-        #bcomposite_object = O1.get() + ndimage.uniform_filter(O2.get(), 6)
-        #np.save(op.join(self.output_folder, 'bcomposite_object'), bcomposite_object)
 
         bsize_model = int(np.ceil(self.size/32.))
         stime = time.time()
@@ -310,8 +306,8 @@ class DataGenerator():
             if self.gen_blur:
                 fmodel =  model + wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0])))
            
-            if i <=5 :
-                np.save('data/hetro/model_blur_%.3d.npy'%i, fmodel) 
+            #if i <=5 :
+            #    np.save('data/hetro/emcM/mix/dpd/model_mix4_%.3d.npy'%i, fmodel) 
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (fmodel, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
 
