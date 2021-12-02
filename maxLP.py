@@ -7,6 +7,7 @@ import cupy as cp
 from cupyx.scipy import sparse
 from cupyx.scipy import ndimage
 from scipy import special
+from calc_frc import FRC
 
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood methods'''
@@ -20,19 +21,19 @@ class MaxLPhaser():
 
         self.counts = cp.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
-        self._gen_pattern(8)
+        self._gen_pattern(4)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
         self.logq_td = cp.zeros((self.size**2, self.num_data))
 
-        self.px_ind, self.py_ind = cp.indices((self.size,)*2, dtype='f8')
-        self.px_ind = self.px_ind.ravel() - self.size//2
-        self.py_ind = self.py_ind.ravel() - self.size//2
-        self.prad = cp.sqrt(self.px_ind**2 + self.py_ind**2)
-        self.pinvsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
-        self.pinvmask = cp.ones(self.size**2, dtype=cp.bool_)
-        self.pinvmask[self.prad<4] = False
-        self.pinvmask[self.prad>=self.size//2]=False
+        self.mx_ind, self.my_ind = cp.indices((self.size,)*2, dtype='f8')
+        self.mx_ind = self.mx_ind.ravel() - self.size//2
+        self.my_ind = self.my_ind.ravel() - self.size//2
+        self.mrad = cp.sqrt(self.mx_ind**2 + self.my_ind**2)
 
+        self.minvsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+        self.minvmask = self._get_invmask(4)
+        self.badpixmask = cp.ones(self.size**2, dtype=cp.bool_)
+        
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
@@ -70,6 +71,11 @@ class MaxLPhaser():
         self.photons = (po_csr + pm_csr)[:self.num_data]
         self.photons_t = self.photons.transpose().tocsr()
 
+    def _get_invmask(self, r):
+        self.minvmask = cp.ones(self.size**2, dtype=cp.bool_)
+        self.minvmask[self.mrad<r] = False
+        self.minvmask[self.mrad>=self.size//2]=False
+        return self.minvmask
 
     def _get_qvals(self):
         ind = (cp.arange(self.size, dtype='f8') - self.size//2) / self.size
@@ -265,12 +271,12 @@ class MaxLPhaser():
 
     def proj_fourier(self, fconv, x):
         out = x.copy()
-        out[self.pinvmask.get()] = fconv[self.pinvmask.get()]
+        out[self.minvmask.get()] = fconv[self.minvmask.get()]
         return out
 
     def proj_real(self, x):
         rmodel = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(x.reshape(self.size, self.size))))
-        rmodel[self.pinvsuppmask.get()] = 0
+        rmodel[self.minvsuppmask.get()] = 0
         return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).ravel()
 
     def er(self, fconv, x):
@@ -283,13 +289,17 @@ class MaxLPhaser():
         return out
 
     def _get_support(self, fconv):
-        smask = special.expit((self.prad.get().reshape(self.size, self.size) - 12)*0.5)
+        smask = special.expit((self.mrad.get().reshape(self.size, self.size) - 12)*0.5)
         rsupp = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fconv.reshape(self.size, self.size)*smask))))
-        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.e-4
+        grsupp = ndimage.gaussian_filter(cp.abs(cp.asarray(rsupp)), 3) > 1.2e-4
         suppmask = cp.ones((self.size,)*2, dtype = cp.bool_)
         suppmask = suppmask > grsupp
         return suppmask
 
+    def _get_tot_mask(self, fconv):
+        self.badpixmask = cp.real(fconv) > -0.2
+        tot_mask =  self.badpixmask*self.minvmask
+        return tot_mask
     def _run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
         fconv = model.copy().ravel()
         self.shifts = cp.array([sx_vals, sy_vals]).T
@@ -328,16 +338,47 @@ class MaxLPhaser():
 
         return fconv
 
-    def _improve_model(self, fconv, update_supp=False):
+    def _improve_model(self, fconv, update_masks=True):
         print('Starting diffmap and er')
+        
         fout = fconv.copy()
-        if update_supp is True:
-            self.pinvsuppmask = self._get_support(fconv.reshape(self.size, self.size))
+        if update_masks is True:
+            self.minvsuppmask = self._get_support(fconv.reshape(self.size, self.size))
+            #self.minvmask = self._get_tot_mask(fconv)
         for i in range(10):
             fout = self.diffmap(fconv, fout)
         for i in range(5):
             fout = self.er(fconv, fout)
-
-        #fout[self.prad.get()>92] = 0 
         print('Done...')
-        return fout, self.pinvsuppmask
+        return fout
+
+    def _beamstop_calib(self, model):
+        radi= [] 
+        frc = [] 
+        fconv = model.copy()
+        '''Beamstop radius in (4,20)'''
+        for i in range(17): 
+             r = i + 4   
+             print('BeamStop Radius', r) 
+             self.minvmask = self._get_invmask(r) 
+             fout = model.copy()   
+             fout = self._improve_model(fconv) 
+             recon = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(fout.reshape(self.size,self.size)))))  
+             rvals, fvals = FRC(sol, recon).calc_rot(num_rot=1800) 
+             radi.append(rvals) 
+             frc.append(fvals) 
+        return radi,frc       
+
+
+
+
+
+
+
+
+
+
+
+
+
+
