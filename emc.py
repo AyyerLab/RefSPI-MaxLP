@@ -415,8 +415,9 @@ class EMC():
 
     def _random_model(self, true_sol=False):
         if true_sol:
-            with h5py.File('data/powder/holo_dia.h5', 'r') as f:
+            with h5py.File('data/hetro/holo_dia_homo.h5', 'r') as f:
                 sol = f['solution'][:]
+            #sol = np.load('data/hetro/blur_obj.npy')
             self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
         elif self.use_divcon:
             rmodel = np.random.random((self.size,)*2)
