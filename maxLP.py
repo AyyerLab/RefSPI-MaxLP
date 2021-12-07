@@ -275,7 +275,8 @@ class MaxLPhaser():
         return out
 
     def proj_real(self, x):
-        rmodel = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(x.reshape(self.size, self.size))))
+        rmodel = np.real(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(x.reshape(self.size, self.size)))))
+        rmodel[rmodel<0] = 0
         rmodel[self.minvsuppmask.get()] = 0
         return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).ravel()
 
