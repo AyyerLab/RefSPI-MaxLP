@@ -21,14 +21,15 @@ class DataGenerator():
         config = configparser.ConfigParser()
         config.read(config_file)
         
-        s = [int(_) for _ in config.get('parameters', 'size').split()]
         self.num_data = config.getint('make_data', 'num_data')  
         self.fluence = config.get('make_data', 'fluence', fallback='constant')
         self.mean_count = config.getfloat('make_data', 'mean_count')
+        
         self.dia_params = [float(s) for s in config.get('make_data', 'dia_params').split()]
         self.shift_sigma = config.getfloat('make_data', 'shift_sigma')
         self.wobble_sigma = config.getfloat('make_data', 'wobble_sigma')
 
+        s = [int(_) for _ in config.get('parameters', 'size').split()]
         use_padding = config.getboolean('make_data', 'use_zero_padding', fallback = False)
         if use_padding:
             self.size = s[1]
@@ -37,26 +38,27 @@ class DataGenerator():
 
         self.object_hetro = config.getboolean('make_data', 'object_hetro', fallback=False)
             
+        self.gen_iso = False
+        self.gen_homo = False
         self.gen_mix = False
         self.gen_blur = False
-        self.gen_homo = False
-        self.gen_iso = False
         object_type = config.get('make_data', 'object_type', fallback='mix')
+        
         if object_type not in ['iso','homo', 'mix', 'blur']:
             raise ValueError('Object type needs to be from (iso, homo, mix or blur')
+        elif object_type == 'iso':
+            self.gen_iso = True
         elif object_type == 'homo':
             self.gen_homo = True
         elif object_type == 'mix':
             self.gen_mix = True
         elif object_type == 'blur':
             self.gen_blur = True
-        elif object_type == 'iso':
-            self.gen_iso = True
 
         self.create_random = config.getboolean('make_data', 'create_random', fallback= False)
-
         self.bg_count = config.getfloat('make_data', 'bg_count', fallback=None)
         self.rel_scale = config.getfloat('make_data', 'rel_scale')
+        
         self.output_folder =op.join(op.dirname(config_file), config.get('make_data', 'output_folder'))
         self.out_photons_file = os.path.join(os.path.dirname(config_file), config.get('make_data', 'out_photons_file'))
 
@@ -115,7 +117,7 @@ class DataGenerator():
                 if self.create_random:
                     wobble_rad = (0.7 + 0.3 * cp.random.rand(1, dtype = 'f8')) * self.size/ 22.
                     while True:
-                        cen = cp.random.rand(2, dtype='f8') * self.size / 10. + mcen * 4./6.  # Size of cluster + Distance from centre
+                        cen = cp.random.rand(2, dtype='f8') * self.size / 10. + mcen * 4./6.
                         dist = float(cp.sqrt((cen[0] - mcen)**2 + (cen[1] - mcen)**2) + wobble_rad)
                         if dist < mcen:
                             break
@@ -247,13 +249,6 @@ class DataGenerator():
         ones = fptr.create_dataset('ones', (self.num_data,), dtype='i4')
         multi = fptr.create_dataset('multi', (self.num_data,), dtype='i4')
 
-        shifts = np.random.randn(self.num_data, 2)*self.shift_sigma
-        fptr['true_shifts'] = shifts
-        
-        if self.object_hetro:
-            if 'true_wobbles' in fptr: del fptr['true_wobbles']
-            wobbles = np.random.randn(self.num_data, 2)*self.wobble_sigma
-            fptr['true_wobbles'] = wobbles
 
         if self.fluence == 'gamma':
             scale = np.random.gamma(2., 0.5, self.num_data)
@@ -261,6 +256,14 @@ class DataGenerator():
             scale = np.ones(self.num_data, dtype='f8')
         fptr['scale'] = scale
 
+        shifts = np.random.randn(self.num_data, 2)*self.shift_sigma
+        fptr['true_shifts'] = shifts
+        
+        if self.object_hetro:
+            if 'true_wobbles' in fptr: del fptr['true_wobbles']
+            wobbles = np.random.randn(self.num_data, 2)*self.wobble_sigma
+            fptr['true_wobbles'] = wobbles
+        
         diameters = np.random.randn(self.num_data)*self.dia_params[1] + self.dia_params[0]
         fptr['true_diameters'] = diameters
 
@@ -268,7 +271,7 @@ class DataGenerator():
         #rel_scales = diameters**3 * 1000. / 7**3
         #scale *= rel_scales/1.e3
 
-        angles = np.random.randn(self.num_data) * 2. * np.pi
+        angles = np.random.rand(self.num_data) * 2. * np.pi
         fptr['true_angles'] = angles
 
         view = cp.zeros(self.size**2, dtype='f8')
@@ -287,27 +290,23 @@ class DataGenerator():
         qy = (y - mcen) / (2 * mcen) 
  
         for i in range(self.num_data):
-
             if self.gen_iso:
                 fmodel = model
-
+            if self.gen_homo:
+                wobbles[i,0] = np.where(wobbles[i,0]>0.4, 4.5, 4.5)
+                fmodel =  model + (np.fliplr(wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0]))))  
+                                         + wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + qy * wobbles[i,0])))) / 2
             if self.gen_mix:
                 wobbles[i,0] = np.where(wobbles[i,0]>0.4, 4.5, 4.5)
                 if i % 2 == 0:
                     fmodel =  model + wobble_model * cp.exp(2 * cp.pi * 1j * ((qx * wobbles[i,0] + qy * wobbles[i,0])))
                 else:
                     fmodel =  model + np.fliplr(wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0]))))
-            
-            if self.gen_homo:
-                wobbles[i,0] = np.where(wobbles[i,0]>0.4, 4.5, 4.5)
-                fmodel =  model + (np.fliplr(wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0]))))  
-                                         + wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + qy * wobbles[i,0])))) / 2
-            
             if self.gen_blur:
                 fmodel =  model + wobble_model * cp.exp( 2 * cp.pi * 1j * ((qx * wobbles[i,0] + (-3.7) * qy * wobbles[i,0])))
            
             #if i <=5 :
-            #    np.save('data/hetro/emcM/mix/dpd/model_mix4_%.3d.npy'%i, fmodel) 
+            #    np.save('data/new/hetro/model_blur_%.3d.npy'%i, fmodel) 
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                 (fmodel, shifts[i,0], shifts[i,1], diameters[i], self.rel_scale, scale[i], self.size, zmask, 0, view))
 
@@ -316,7 +315,6 @@ class DataGenerator():
             else:
                 view *= mask.ravel()
             view *= self.mean_count / view.sum()
-
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
 
