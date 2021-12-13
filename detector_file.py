@@ -6,7 +6,7 @@ sys.path.append('/home/ayyerkar/.local/dragonfly/utils/py_src/')
 
 import detector
 
-size = 385
+size = 185
 
 det = detector.Detector()
 
