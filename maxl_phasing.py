@@ -107,17 +107,21 @@ class MaxLPhaser():
             sampled_states = fsampled_states 
         return sampled_states
 
-    def _get_prob(self, sampled_states, shifts, diams):
+    def _get_prob(self, sampled_states, shifts, diams, angs, with_angs=True):
         xshifts = shifts[:,0]
         yshifts = shifts[:,1]
         prob_m = np.zeros((len(sampled_states), len(shifts)))
         for i in range(len(shifts)):
             for j in range(len(sampled_states)):
-                if sampled_states[j][0]==xshifts[i] and sampled_states[j][1]==yshifts[i] and sampled_states[j][2]==diams[j]:
-                    prob_m[j,i] = 1
+                if with_angs is True:
+                    if sampled_states[j][0]==xshifts[i] and sampled_states[j][1]==yshifts[i] and sampled_states[j][2]==diams[i] and sampled_states[j][3]==angs[i]:
+                        prob_m[j,i] = 1
+                else:
+                    if sampled_states[j][0]==xshifts[i] and sampled_states[j][1]==yshifts[i] and sampled_states[j][2]==diams[i]:
+                        prob_m[j,i] = 1
         return prob_m
 
-    def _parse_data(self, data_fname, num_data, binning = False, hetro=False):
+    def _parse_data(self, data_fname, num_data, binning = False, hetro=True):
         with h5py.File(data_fname, 'r') as fptr:
             if hetro is True:
                 self.rigid = fptr['rigid'][:]
@@ -519,10 +523,7 @@ def main():
     phaser = MaxLPhaser('data/maxl/holo_dia.h5')
     size = phaser.size
 
-    #rcurr = np.random.random((size, size))*(phaser.sol>1.e-4) * 7
-    #fcurr = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rcurr))) * 1.e-3
     fcurr = 2*(np.random.random(size**2) + 1j*np.random.random(size**2)) - 1 
-    #fconv = fcurr.copy().ravel()
     fconv = fcurr.copy()
     num_streams = 4
     streams = [cp.cuda.Stream() for _ in range(num_streams)]
