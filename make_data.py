@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-'Module for generating objects (homo- and hetro-geneous) and corresponding diffraction patterns '
+'Module for generating objects (homo- & hetro-geneous) and corresponding diffraction patterns '
 
 import sys
 import os
@@ -214,13 +214,13 @@ class DataGenerator():
         mcen = self.size // 2.
  
         mask = cp.ones(self.object.shape, dtype='f8')
-        pixrad = cp.sqrt((x - cen)**2 + (y - cen)**2)
+        pixrad = cp.sqrt((x-cen)**2 + (y-cen)**2)
         mask[pixrad<4] = 0
         mask[pixrad>=cen] = 0
 
         if self.object_hetro:
             wobble_mask = cp.ones(self.wobble_object.shape, dtype='f8')
-            wobble_pixrad = cp.sqrt((x - cen)**2 + (y - cen)**2)
+            wobble_pixrad = cp.sqrt((x-cen)**2 + (y-cen)**2)
             wobble_mask[wobble_pixrad<4] = 0
             wobble_mask[wobble_pixrad>=cen] = 0
 
@@ -232,6 +232,7 @@ class DataGenerator():
         if 'place_multi' in fptr: del fptr['place_multi']
         if 'count_multi' in fptr: del fptr['count_multi']
         if 'num_pix' in fptr: del fptr['num_pix']
+        
         if 'true_shifts' in fptr: del fptr['true_shifts']
         if 'true_diameters' in fptr: del fptr['true_diameters']                                
         if 'true_angles' in fptr: del fptr['true_angles']
@@ -334,7 +335,7 @@ class DataGenerator():
 def main():
     parser = argparse.ArgumentParser(description='Padman data generator')
     parser.add_argument('-c', '--config_file',
-                        help='Path to config file (Default: config.ini)',
+                        help='Path to config file (Default: make_data_config.ini)',
                         default='make_data_config.ini')
     parser.add_argument('-m', '--mask_only',
                         help='Create mask only and not the data frames',
