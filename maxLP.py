@@ -10,7 +10,7 @@ from scipy import special
 from calc_frc import FRC
 
 class MaxLPhaser():
-    '''Reconstruction of object from holographic data using maximum likelihood methods'''
+    '''Reconstruction of object from holographic data using maximum likelihood and pattern search'''
     def __init__(self, data_fname, num_data=-1):
         self.size = 185
         self._load_kernels()
