@@ -14,7 +14,7 @@ INVPHI = 1. / PHI
 INVPHI2 = 1. / PHI**2
 
 class MaxLPhaser():
-    '''Reconstruction of object from holographic data using maximum likelihood methods'''
+    '''Reconstruction of object from holographic diffraction data and true latent paramemeters using maximum likelihood methods'''
     def __init__(self, data_fname, num_data=-1):
         self._load_kernels()
         self._parse_data(data_fname, num_data)
@@ -121,7 +121,7 @@ class MaxLPhaser():
                         prob_m[j,i] = 1
         return prob_m
 
-    def _parse_data(self, data_fname, num_data, binning = False, hetro=True):
+    def _parse_data(self, data_fname, num_data, binning = False, hetro=False):
         with h5py.File(data_fname, 'r') as fptr:
             if hetro is True:
                 self.rigid = fptr['rigid'][:]
