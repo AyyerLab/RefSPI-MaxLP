@@ -315,7 +315,7 @@ class DataGenerator():
                 view *= (mask.ravel() + wobble_mask.ravel())
             else:
                 view *= mask.ravel()
-           # print(self.mean_count/view.sum())
+            #print(self.mean_count/view.sum())
             view *= self.mean_count / view.sum()
             self.k_slice_gen((bsize_model,)*2, (32,)*2,
                 (view, angles[i], 1., self.size, self.bgmask, 0, rview)) 
