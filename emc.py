@@ -9,17 +9,15 @@ import configparser
 import time
 
 import numpy as np
-from scipy import ndimage
-import h5py
-from mpi4py import MPI
 import cupy as cp
+import h5py
+from scipy import ndimage, special
+from mpi4py import MPI
 
-from scipy import special
 import maxLP
 
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
-
 
 class Dataset():
     '''Parses sparse photons dataset from HDF5 file
@@ -105,39 +103,54 @@ class EMC():
         self.num_proc = self.comm.size
         self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
+        self._compile_kernels()
+
         config = configparser.ConfigParser()
         config.read(config_file)
+        self._parse_params(config, op.dirname(config_file))
+        self._generate_states(config)
+        self._generate_masks()
+        self._generate_support(config)
 
+        self.phaser = maxLP.MaxLPhaser(self.photons_file, size=self.size)
+
+        self._parse_data()
+        self._init_model()
+
+        self.prob = cp.array([])
+        self.bsize_model = int(np.ceil(self.size/32.))
+        self.bsize_data = int(np.ceil(self.dset.num_data/32.))
+        self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
+
+    def _parse_params(self, config, start_dir):
         self.size = config.getint('emc', 'size')
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')
-        self.support_area = config.getfloat('emc', 'support_area')
-        self.photons_file = op.join(op.dirname(config_file),
-                                    config.get('emc', 'in_photons_file'))
-        self.output_folder = op.join(op.dirname(config_file),
-                                     config.get('emc', 'output_folder'))
-        self.log_file = op.join(op.dirname(config_file),
-                                config.get('emc', 'log_file'))
+        self.support_area = config.getfloat('emc', 'support_area', fallback=self.size**2)
+        self.photons_file = op.join(start_dir, config.get('emc', 'in_photons_file'))
+        self.output_folder = op.join(start_dir, config.get('emc', 'output_folder'))
+        self.log_file = op.join(start_dir, config.get('emc', 'log_file'))
+        self.support_file = op.join(start_dir, config.get('emc', 'support_file', fallback=''))
 
-        use_true_sol = config.getboolean('emc', 'use_true_solution', fallback=False)
-        use_true_supp = config.getboolean('emc', 'use_true_support', fallback=False)
-        self.true_support = op.join(op.dirname(config_file), config.get('emc', 'true_support_file'))
-
-        self.use_phaser = False
-        self.use_divcon = False
-        phasing_type = config.get('emc', 'phasing_type', fallback='mlp')
-        if phasing_type not in ['mlp', 'divcon']:
+        self.phasing_type = config.get('emc', 'phasing_type', fallback='mlp').lower()
+        if self.phasing_type not in ['mlp', 'divcon']:
             raise ValueError('Phasing type needs to be either mlp or divcon')
-        elif phasing_type == 'mlp':
-            self.use_phaser = True
-        elif phasing_type == 'divcon':
-            self.use_divcon = True
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
         self.decrease_sigma = config.getboolean('emc', 'decrease_sigma', fallback=False)
         self.decrease_supp_area = config.getboolean('emc', 'decrease_supp_area', fallback=False)
-        self.phaser = maxLP.MaxLPhaser(self.photons_file)
 
+    def _generate_support(self, config):
+        use_true_supp = config.getboolean('emc', 'use_true_support', fallback=False)
+        if use_true_supp:
+            self.invsuppmask = cp.load(self.support_file)
+        elif self.phasing_type == 'mlp':
+            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+        elif self.phasing_type == 'divcon':
+            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
+            self.invsuppmask[58:108,58:108]  = False
+
+    def _generate_states(self, config):
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
         sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
         sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
@@ -156,26 +169,31 @@ class EMC():
         self.y_ind = self.y_ind.ravel() - self.size // 2
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
 
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.num_states.prod()))]
+        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
+
+    def _generate_masks(self):
         self.invmask = cp.zeros(self.size**2, dtype=cp.bool_)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
-        if use_true_supp:
-            self.invsuppmask = cp.load(self.true_support)
-        elif phasing_type == 'mlp':
-            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
-        elif phasing_type == 'divcon':
-            self.invsuppmask = cp.ones((self.size,)*2, dtype=cp.bool_)
-            self.invsuppmask[58:108,58:108]  = False
-
         self.probmask = cp.zeros(self.size**2, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.num_states.prod()))]
-        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
 
+    def _compile_kernels(self):
+        with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
+            kernels = cp.RawModule(code=f.read())
+        self.k_slice_gen = kernels.get_function('slice_gen')
+        self.k_slice_merge = kernels.get_function('slice_merge')
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
+        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
+        self.k_merge_all = kernels.get_function('merge_all')
+        self.k_proj_divide = kernels.get_function('proj_divide')
+
+    def _parse_data(self):
         stime = time.time()
         self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
         self.powder = self.dset.get_powder()
@@ -185,30 +203,20 @@ class EMC():
             print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
                     (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
             sys.stdout.flush()
+
+    def _init_model(self):
         self.model = np.empty((self.size**2,), dtype='c16')
 
         if self.rank == 0:
-            self._random_model(true_sol=use_true_sol)
+            self._random_model()
             np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
+
         self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
+
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
-        self.prob = cp.array([])
-        with open('kernels.cu', 'r') as f:
-            kernels = cp.RawModule(code=f.read())
-        self.k_slice_gen = kernels.get_function('slice_gen')
-        self.k_slice_merge = kernels.get_function('slice_merge')
-        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
-        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
-        self.k_merge_all = kernels.get_function('merge_all')
-        self.k_proj_divide = kernels.get_function('proj_divide')
-
-        self.bsize_model = int(np.ceil(self.size/32.))
-        self.bsize_data = int(np.ceil(self.dset.num_data/32.))
-        self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
-
 
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMC algorithm
@@ -231,12 +239,11 @@ class EMC():
 
         self._calculate_prob(dmodel, views)
         self._normalize_prob()
-        if self.use_phaser:
-            sx_vals, sy_vals, dia_vals, ang_vals = self.unravel_rmax(self.rmax)
+        if self.phasing_type == 'mlp':
+            sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
             self.model = self.phaser._run_phaser(self.model, sx_vals, sy_vals, dia_vals, ang_vals)
-            
-        elif self.use_divcon:
-            self._update_model(intens, dmodel)
+        else:
+            self._update_model(intens)
             self._normalize_model(intens, dmodel, iternum)
             self.shrinkwrap(self.model, iternum)
         self.save_output(self.model, iternum)
@@ -282,8 +289,12 @@ class EMC():
                          self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                          -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))
+            if self.rank == 0:
+                sys.stderr.write('\r%d/%d' % (i, self.num_states.prod()))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
+        if self.rank == 0:
+            sys.stderr.write('\n')
 
     def _normalize_prob(self):
         max_exp_p = self.prob.max(0).get()
@@ -305,7 +316,7 @@ class EMC():
         #self.prob.clip(a_min=P_MIN, out=self.prob)
         np.save(op.join(self.output_folder, 'prob.npy'), self.prob.get())
 
-    def unravel_rmax(self, rmax):
+    def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
         sx_vals = cp.unique(self.shiftx)[sx]
         sy_vals = cp.unique(self.shifty)[sy]
@@ -313,7 +324,7 @@ class EMC():
         ang_vals = ang*cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
 
-    def _update_model(self, intens, dmodel, drange=None):
+    def _update_model(self, intens, drange=None):
         if drange is None:
             s, e = (0, self.dset.num_data)
         else:
@@ -378,7 +389,8 @@ class EMC():
 
     def shrinkwrap(self, model, iternum):
         if iternum < 5 or iternum % 5 == 0 :
-            amodel =np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(model.reshape((self.size,)*2)))))
+            amodel = np.abs(np.fft.fftshift(np.fft.ifftn(
+                np.fft.ifftshift(model.reshape((self.size,)*2)))))
             if iternum <= 5:
                 sigma = 3
             else:
@@ -407,25 +419,20 @@ class EMC():
             if intens is not None:
                 fptr['intens'] = intens.get()
 
-            sx_vals, sy_vals, dia_vals, ang_vals = self.unravel_rmax(self.rmax)
+            sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
             fptr['angles'] = ang_vals
             fptr['diameters'] = dia_vals.get()
             fptr['shifts'] = np.array([sx_vals.get(), sy_vals.get()]).T
             fptr['support'] = ~self.invsuppmask.get()
 
-    def _random_model(self, true_sol=False):
-        if true_sol:
-            with h5py.File('data/hetro/holo_dia.h5', 'r') as f:
-                sol = f['solution'][:]
-            #sol = np.load('data/hetro/blur_obj.npy')
-            self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(sol))).ravel() / 1.e3
-        elif self.use_divcon:
+    def _random_model(self):
+        if self.phasing_type == 'mlp':
+            self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
+        else:
             rmodel = np.random.random((self.size,)*2)
             rmodel[self.invsuppmask.get()] = 0
             self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel))).flatten()
             self.model /= 2.e3
-        elif self.use_phaser:
-            self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.x_ind*self.shiftx[n] + self.y_ind*self.shifty[n])/self.size)
@@ -498,7 +505,6 @@ def main():
             sys.stdout.flush()
             cp.cuda.Device(dev).use()
 
-
     recon = EMC(args.config_file, num_streams=args.streams)
     logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
     if rank == 0:
@@ -511,7 +517,7 @@ def main():
         stime = time.time()
         recon.run_iteration(i+1)
         etime = time.time()
-        sys.stderr.write('\r%d/%d (%f s)'% (i+1, args.num_iter, etime-stime))
+        sys.stderr.write('\r%d/%d (%f s)\n'% (i+1, args.num_iter, etime-stime))
         if rank == 0:
             norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
             logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
