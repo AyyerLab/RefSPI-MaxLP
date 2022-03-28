@@ -14,78 +14,11 @@ import h5py
 from scipy import ndimage, special
 from mpi4py import MPI
 
-import maxLP
+from dset import Dataset
+from maxLP import MaxLPhaser
 
 P_MIN = 1.e-6
 MEM_THRESH = 0.8
-
-class Dataset():
-    '''Parses sparse photons dataset from HDF5 file
-
-    Args:
-        photons_file (str): Path to HDF5 photons file
-        num_pix (int): Expected number of pixels in sparse file
-        need_scaling (bool, optional): Whether scaling will be used
-
-    Returns:
-        Dataset object with attributes containing photon locations
-    '''
-    def __init__(self, photons_file, num_pix, need_scaling=False):
-        self.powder = None
-        mpool = cp.get_default_memory_pool()
-        init_mem = mpool.used_bytes()
-        self.photons_file = photons_file
-        self.num_pix = num_pix
-
-        with h5py.File(self.photons_file, 'r') as fptr:
-            if self.num_pix != fptr['num_pix'][...]:
-                raise AttributeError('Number of pixels in photons file does not match')
-            self.num_data = fptr['place_ones'].shape[0]
-            try:
-                self.ones = cp.array(fptr['ones'][:])
-            except KeyError:
-                self.ones = cp.array([len(fptr['place_ones'][i])
-                                      for i in range(self.num_data)]).astype('i4')
-            self.ones_accum = cp.roll(self.ones.cumsum(), 1)
-            self.ones_accum[0] = 0
-            self.place_ones = cp.array(np.hstack(fptr['place_ones'][:]))
-
-            try:
-                self.multi = cp.array(fptr['multi'][:])
-            except KeyError:
-                self.multi = cp.array([len(fptr['place_multi'][i])
-                                       for i in range(self.num_data)]).astype('i4')
-            self.multi_accum = cp.roll(self.multi.cumsum(), 1)
-            self.multi_accum[0] = 0
-            self.place_multi = cp.array(np.hstack(fptr['place_multi'][:]))
-            self.count_multi = np.hstack(fptr['count_multi'][:])
-
-            self.mean_count = float((self.place_ones.shape[0] +
-                                     self.count_multi.sum()
-                                    ) / self.num_data)
-
-            if need_scaling:
-                self.counts = self.ones + cp.array([self.count_multi[m_a:m_a+m].sum()
-                                                    for m, m_a in zip(self.multi.get(), self.multi_accum.get())])
-            self.count_multi = cp.array(self.count_multi)
-
-            try:
-                self.bg = cp.array(fptr['bg'][:]).ravel()
-                print('Using background model with %.2f photons/frame' % self.bg.sum())
-            except KeyError:
-                self.bg = cp.zeros(self.num_pix)
-        self.mem = mpool.used_bytes() - init_mem
-
-    def get_powder(self):
-        if self.powder is not None:
-            return self.powder
-
-        self.powder = np.zeros(self.num_pix)
-        np.add.at(self.powder, self.place_ones.get(), 1)
-        np.add.at(self.powder, self.place_multi.get(), self.count_multi.get())
-        self.powder /= self.num_data
-        self.powder = cp.array(self.powder)
-        return self.powder
 
 class EMC():
     '''Reconstructor object using parameters from config file
@@ -111,7 +44,7 @@ class EMC():
         self._generate_states(config)
         self._generate_masks()
 
-        self.phaser = maxLP.MaxLPhaser(self.photons_file, size=self.size)
+        self.phaser = MaxLPhaser(self.photons_file, size=self.size)
 
         self._parse_data()
         self._init_model()
@@ -309,60 +242,3 @@ class EMC():
         s[s==0] = 1.e-5
         return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
 
-def main():
-    '''Parses command line arguments and launches EMC reconstruction'''
-    import socket
-    parser = argparse.ArgumentParser(description='In-plane rotation EMC')
-    parser.add_argument('num_iter', type=int,
-                        help='Number of iterations')
-    parser.add_argument('-c', '--config_file', default='emc_config.ini',
-                        help='Path to configuration file (default: emc_config.ini)')
-    parser.add_argument('-d', '--devices', default = 'device.txt',
-                        help='Path to devices file')
-    parser.add_argument('-s', '--streams', type=int, default=4,
-                        help='Number of streams to use (default=4)')
-    args = parser.parse_args()
-
-    comm = MPI.COMM_WORLD
-    rank = comm.rank
-    num_proc = comm.size
-    if args.devices is None:
-        if num_proc == 1:
-            print('Running on default device 0')
-        else:
-            print('Require a "devices" file if using multiple processes (one number per line)')
-            sys.exit(1)
-    else:
-        with open(args.devices) as f:
-            dev = int(f.readlines()[rank].strip())
-            print('Rank %d: %s (Device %d)' % (rank, socket.gethostname(), dev))
-            sys.stdout.flush()
-            cp.cuda.Device(dev).use()
-
-    recon = EMC(args.config_file, num_streams=args.streams)
-    logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
-    if rank == 0:
-        logf.write('Iter  time(s)  change\n')
-        logf.flush()
-        avgtime = 0.
-        numavg = 0
-    for i in range(args.num_iter):
-        m0 = cp.array(recon.model)
-        stime = time.time()
-        recon.run_iteration(i+1)
-        etime = time.time()
-        sys.stderr.write('\r%d/%d (%f s)\n'% (i+1, args.num_iter, etime-stime))
-        if rank == 0:
-            norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
-            logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
-            print('Change from last iteration: ', norm)
-            logf.flush()
-            if i > 0:
-                avgtime += etime-stime
-                numavg += 1
-    if rank == 0 and numavg > 0:
-        print('\n%.4e s/iteration on average' % (avgtime / numavg))
-    logf.close()
-
-if __name__ == '__main__':
-    main()
