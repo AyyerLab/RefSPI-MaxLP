@@ -4,15 +4,15 @@ import time
 import h5py
 import numpy as np
 import cupy as cp
-from cupyx.scipy import sparse
-from cupyx.scipy import ndimage
+from cupyx.scipy import sparse, ndimage
 from scipy import special
+
 from calc_frc import FRC
 
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood and pattern search'''
-    def __init__(self, data_fname, num_data=-1):
-        self.size = 185
+    def __init__(self, data_fname, size=185, num_data=-1):
+        self.size = size
         self._load_kernels()
         self._parse_data(data_fname, num_data)
         self._get_qvals()
@@ -52,7 +52,6 @@ class MaxLPhaser():
             ones, multi = fptr['ones'][:], fptr['multi'][:]
             po, pm, cm = fptr['place_ones'][:], fptr['place_multi'][:], fptr['count_multi'][:] # pylint: disable=invalid-name
 
-        self.size = 185
         if num_data < 0:
             self.num_data = len(ones)
         else:
@@ -85,11 +84,12 @@ class MaxLPhaser():
         self.qrad = cp.sqrt(self.qx**2 + self.qy**2)
         self.qrad[self.qrad==0] = 1.e-6
 
+        #TODO: Important!! Generalize these thresholds
         self.mask = (self.qrad > 4/self.size) & (self.qrad < 0.5)
         #ring mask for first rescale estimate
-        self.rmask = (self.qrad > 33/self.size) & (self.qrad < 0.19)
-        #ring mask for second rescale estomate, closer to low q
-        self.nmask = (self.qrad > 23/self.size) & (self.qrad < 0.14)
+        self.rmask = (self.qrad > 0.39) & (self.qrad < 0.41)
+        #ring mask for second rescale estimate, closer to low q
+        self.nmask = (self.qrad > 0.24) & (self.qrad < 0.27)
         #mask containing bad pixel region in low q
         self.bmask = (self.qrad > 4/self.size) & (self.qrad < 0.1)
         self.mask_ind = cp.where(self.mask.ravel())[0]
@@ -138,7 +138,6 @@ class MaxLPhaser():
             fobj_t = fobj_t_new
 
         return fobj_t
-
 
     def iterate_pixel(self, fobj_t, t, rescale=None, const=None, **kwargs):
         '''Optimize for given model pixel t using Golden Section Search on phase and magnitude'''
@@ -301,6 +300,7 @@ class MaxLPhaser():
         self.badpixmask = cp.real(fconv) > -0.2
         tot_mask =  self.badpixmask*self.minvmask
         return tot_mask
+
     def _run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
         fconv = model.copy().ravel()
         self.shifts = cp.array([sx_vals, sy_vals]).T
@@ -332,7 +332,7 @@ class MaxLPhaser():
         for t in range(self.size**2):
             if not self.mask[t]:
                 continue
-            fconv[t] = self.run_pixel_pattern(fconv, t, rescale = rescale, num_iter=10)
+            fconv[t] = self.run_pixel_pattern(fconv, t, rescale=rescale, num_iter=10)
             sys.stderr.write('\r%d/%d'%(t+1, self.size**2))
         sys.stderr.write('\n')
         print('Phasing done..')
@@ -369,17 +369,3 @@ class MaxLPhaser():
              radi.append(rvals) 
              frc.append(fvals) 
         return radi,frc       
-
-
-
-
-
-
-
-
-
-
-
-
-
-
