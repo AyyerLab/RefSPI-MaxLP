@@ -151,7 +151,7 @@ class EMC():
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
         self._calculate_prob(dmodel, views)
-        self._normalize_prob()
+        self._get_rmax()
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         self.model = self.phaser._run_phaser(self.model, sx_vals, sy_vals, dia_vals, ang_vals)
         self.save_output(self.model, iternum)
@@ -204,6 +204,17 @@ class EMC():
         if self.rank == 0:
             sys.stderr.write('\n')
 
+    def _get_rmax(self):
+        max_exp_p = self.prob.max(0).get()
+        rmax_p = self.prob.argmax(axis=0).get().astype('i4')
+        rmax_p = ((rmax_p//self.num_rot)*self.num_proc + self.rank)*self.num_rot + rmax_p%self.num_rot
+        max_exp = np.empty_like(max_exp_p)
+        self.rmax = np.empty_like(rmax_p)
+
+        self.comm.Allreduce([max_exp_p, MPI.DOUBLE], [max_exp, MPI.DOUBLE], op=MPI.MAX)
+        rmax_p[max_exp_p != max_exp] = -1
+        self.comm.Allreduce([rmax_p, MPI.INT], [self.rmax, MPI.INT], op=MPI.MAX)
+
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
         sx_vals = cp.unique(self.shiftx)[sx]
@@ -218,7 +229,7 @@ class EMC():
             return
 
         with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
-            fptr['model'] = self.model
+            fptr['model'] = self.model.reshape((self.size,)*2)
             if intens is not None:
                 fptr['intens'] = intens.get()
 
