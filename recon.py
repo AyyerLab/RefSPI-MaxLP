@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import sys
 import os.path as op
 import argparse
@@ -16,7 +18,7 @@ def main():
                         help='Number of iterations')
     parser.add_argument('-c', '--config_file', default='emc_config.ini',
                         help='Path to configuration file (default: emc_config.ini)')
-    parser.add_argument('-d', '--devices', default = 'device.txt',
+    parser.add_argument('-d', '--devices',
                         help='Path to devices file')
     parser.add_argument('-s', '--streams', type=int, default=4,
                         help='Number of streams to use (default=4)')
