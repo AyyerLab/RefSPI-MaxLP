@@ -12,8 +12,8 @@ import numpy as np
 import cupy as cp
 import h5py
 from scipy import ndimage, special
-from mpi4py import MPI
 
+from det import Detector
 from dset import Dataset
 from maxLP import MaxLPhaser
 
@@ -31,9 +31,6 @@ class EMC():
     '''
     def __init__(self, config_file, num_streams=4):
         self.num_streams = num_streams
-        self.comm = MPI.COMM_WORLD
-        self.rank = self.comm.rank
-        self.num_proc = self.comm.size
         self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
         self._compile_kernels()
@@ -55,10 +52,10 @@ class EMC():
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
 
     def _parse_params(self, config, start_dir):
-        self.size = config.getint('emc', 'size')
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')
         self.photons_file = op.join(start_dir, config.get('emc', 'in_photons_file'))
+        self.detector_file = op.join(start_dir, config.get('emc', 'in_detector_file'))
         self.output_folder = op.join(start_dir, config.get('emc', 'output_folder'))
         self.log_file = op.join(start_dir, config.get('emc', 'log_file'))
 
@@ -78,10 +75,12 @@ class EMC():
         self.num_states = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
         print(self.num_states.prod(), 'sampled states')
 
-        self.x_ind, self.y_ind = cp.indices((self.size,)*2, dtype='f8')
-        self.x_ind = self.x_ind.ravel() - self.size // 2
-        self.y_ind = self.y_ind.ravel() - self.size // 2
+        self.detector = Detector(self.detector_file)
+        self.x_ind = cp.array(self.detector.cx)
+        self.y_ind = cp.array(self.detector.cy)
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
+        self.num_pix = self.x_ind.size
+        self.size = 2 * int(self.rad.max()) + 3
 
         self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.num_states.prod()))]
         self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
@@ -108,7 +107,7 @@ class EMC():
 
     def _parse_data(self):
         stime = time.time()
-        self.dset = Dataset(self.photons_file, self.size**2, self.need_scaling)
+        self.dset = Dataset(self.photons_file, self.num_pix, self.need_scaling)
         self.powder = self.dset.get_powder()
         etime = time.time()
 
@@ -123,8 +122,6 @@ class EMC():
         if self.rank == 0:
             self._random_model()
             np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
-
-        self.comm.Bcast([self.model, MPI.C_DOUBLE_COMPLEX], root=0)
 
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
@@ -144,8 +141,8 @@ class EMC():
         if self.prob.shape != (self.num_states_p*self.num_rot, self.dset.num_data):
             self.prob = cp.empty((self.num_states_p*self.num_rot, self.dset.num_data), dtype='f8')
 
-        views = cp.empty((self.num_streams, self.size**2), dtype='f8')
-        intens = cp.empty((self.num_states.prod(), self.size**2), dtype='f8')
+        views = cp.empty((self.num_streams, self.num_pix), dtype='f8')
+        intens = cp.empty((self.num_states.prod(), self.num_pix), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -211,9 +208,7 @@ class EMC():
         max_exp = np.empty_like(max_exp_p)
         self.rmax = np.empty_like(rmax_p)
 
-        self.comm.Allreduce([max_exp_p, MPI.DOUBLE], [max_exp, MPI.DOUBLE], op=MPI.MAX)
         rmax_p[max_exp_p != max_exp] = -1
-        self.comm.Allreduce([rmax_p, MPI.INT], [self.rmax, MPI.INT], op=MPI.MAX)
 
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
