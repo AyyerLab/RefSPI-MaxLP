@@ -1,5 +1,6 @@
 #include <cupy/complex.cuh>
-#include <math_constants.h>
+//#include <math_constants.h>
+#define CUDART_PI               3.1415926535897931e+0
 
 extern "C" {
 
