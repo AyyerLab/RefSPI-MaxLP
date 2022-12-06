@@ -8,22 +8,25 @@ from cupyx.scipy import sparse, ndimage
 from scipy import special
 
 from calc_frc import FRC
+BATCH_SIZE = 1000
 
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood and pattern search'''
-    def __init__(self, data_fname, size=185, num_data=-1):
+    def __init__(self, dataset, detector, size=185, num_pattern=8, num_data=None):
         self.size = size
+        self.dset = dataset
+        self.det = detector
         self._load_kernels()
-        self._parse_data(data_fname, num_data)
+        self._preproc_data(num_data)
         self._get_qvals()
         self._rot_kwargs = {'reshape': False, 'order': 1, 'prefilter': False}
         self._photons_rotated = False
 
         self.counts = cp.array(self.photons.sum(1))[:,0]
         self.mean_count = self.counts.mean()
-        self._gen_pattern(8)
+        self._gen_pattern(num_pattern)
         self.qvals = cp.ascontiguousarray(cp.array([self.qx, self.qy]).T)
-        self.logq_td = cp.zeros((self.size**2, self.num_data))
+        self.logq_td = cp.zeros((self.det.num_pix, BATCH_SIZE))
 
         self.mx_ind, self.my_ind = cp.indices((self.size,)*2, dtype='f8')
         self.mx_ind = self.mx_ind.ravel() - self.size//2
@@ -47,40 +50,27 @@ class MaxLPhaser():
         x, y = cp.meshgrid(ind, ind, indexing='ij')
         self.pattern = (x + 1j*y).ravel()
 
-    def _parse_data(self, data_fname, num_data):
-        with h5py.File(data_fname, 'r') as fptr:
-            ones, multi = fptr['ones'][:], fptr['multi'][:]
-            po, pm, cm = fptr['place_ones'][:], fptr['place_multi'][:], fptr['count_multi'][:] # pylint: disable=invalid-name
-
-        if num_data < 0:
-            self.num_data = len(ones)
+    def _preproc_data(self, num_data=None):
+        if num_data is None:
+            self.num_data = self.dset.num_data
         else:
             self.num_data = num_data
 
-        po_all = cp.hstack(po)
-        po_csr = sparse.csr_matrix((cp.ones_like(po_all, dtype='f8'),
-                                    cp.array(po_all),
-                                    cp.concatenate((cp.array([0]), cp.cumsum(cp.array(ones))), axis=0)
-                                   ), shape=(len(po), self.size**2))
-        pm_csr = sparse.csr_matrix((cp.hstack(cm).astype('f8'),
-                                    cp.hstack(pm),
-                                    cp.concatenate((cp.array([0]), cp.cumsum(cp.array(multi))), axis=0)
-                                   ), shape=(len(pm), self.size**2))
+        po_csr = sparse.csr_matrix((cp.ones_like(self.dset.place_ones, dtype='f8'),
+                                    self.dset.place_ones,
+                                    cp.append(self.dset.ones_accum, len(self.dset.place_ones)),
+                                   ), shape=(self.dset.num_data, self.det.num_pix))
+        pm_csr = sparse.csr_matrix((self.dset.count_multi.astype('f8'),
+                                    self.dset.place_multi,
+                                    cp.append(self.dset.multi_accum, len(self.dset.place_multi)),
+                                   ), shape=(self.dset.num_data, self.det.num_pix))
 
         self.photons = (po_csr + pm_csr)[:self.num_data]
         self.photons_t = self.photons.transpose().tocsr()
 
-    def _get_invmask(self, r):
-        self.minvmask = cp.ones(self.size**2, dtype=cp.bool_)
-        self.minvmask[self.mrad<r] = False
-        self.minvmask[self.mrad>=self.size//2]=False
-        return self.minvmask
-
     def _get_qvals(self):
-        ind = (cp.arange(self.size, dtype='f8') - self.size//2) / self.size
-        self.qx, self.qy = cp.meshgrid(ind, ind, indexing='ij')
-        self.qx = self.qx.ravel()
-        self.qy = self.qy.ravel()
+        self.qx = cp.array(self.det.cx) / self.size
+        self.qy = cp.array(self.det.cy) / self.size
         self.qrad = cp.sqrt(self.qx**2 + self.qy**2)
         self.qrad[self.qrad==0] = 1.e-6
 
@@ -94,15 +84,28 @@ class MaxLPhaser():
         self.bmask = (self.qrad > 4/self.size) & (self.qrad < 0.1)
         self.mask_ind = cp.where(self.mask.ravel())[0]
 
+    def _get_invmask(self, r):
+        self.minvmask = cp.ones(self.size**2, dtype=cp.bool_)
+        self.minvmask[self.mrad<r] = False
+        self.minvmask[self.mrad>=self.size//2]=False
+        return self.minvmask
+
     def get_qcurr(self, fobj, rescale):
         if not self._photons_rotated:
             self._rotate_photons()
         pix = cp.arange(self.size**2)
-        self.k_get_logq_pixel((int(cp.ceil(len(pix)/16.)),), (16,),
-                (fobj, pix, rescale, self.diams, self.shifts, self.qvals,
-                 self.photons_t.indptr, self.photons_t.indices, self.photons_t.data,
-                 self.num_data, len(pix), self.logq_td))
-        return self.logq_td.mean(1)
+
+        num_batches = np.ceil(self.num_data // BATCH_SIZE)
+        qcurr = cp.zeros((0,))
+        for b in np.arange(num_batches):
+            s = b*BATCH_SIZE
+            e = min((b+1)*BATCH_SIZE, self.num_data)
+            self.k_get_logq_pixel((int(cp.ceil(len(pix)/16.)),), (16,),
+                    (fobj, pix, rescale, self.diams, self.shifts, self.qvals,
+                     self.photons_t.indptr[s:e], self.photons_t.indices[s:e], self.photons_t.data[s:e],
+                     e-s, len(pix), self.logq_td))
+            qcurr = cp.append(qcurr, self.logq_td[:e-s].mean(1))
+        return qcurr
 
     def get_pixel_constants(self, t , frac=None):
         if frac is None:
