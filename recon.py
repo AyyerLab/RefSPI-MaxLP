@@ -19,10 +19,12 @@ def main():
                         help='Path to configuration file (default: emc_config.ini)')
     parser.add_argument('-s', '--streams', type=int, default=4,
                         help='Number of streams to use (default=4)')
+    parser.add_argument('-d', '--device', type=int, default=0,
+                        help='Device index (default=0)')
     args = parser.parse_args()
 
-    print('Running on default device 0')
-    cp.cuda.Device(0).use()
+    print('Running on device', args.device)
+    cp.cuda.Device(args.device).use()
 
     recon = EMC(args.config_file, num_streams=args.streams)
     logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
