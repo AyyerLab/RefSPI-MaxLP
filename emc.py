@@ -27,7 +27,6 @@ class EMC():
         config_file (str): Path to configuration file
 
     The appropriate CUDA device must be selected before initializing the class.
-    Can be used with mpirun, in which case work will be divided among ranks.
     '''
     def __init__(self, config_file, num_streams=4):
         self.num_streams = num_streams
@@ -40,13 +39,12 @@ class EMC():
         self._parse_params(config, op.dirname(config_file))
         self._generate_states(config)
         self._generate_masks()
-
-        self.phaser = MaxLPhaser(self.photons_file, size=self.size)
-
         self._parse_data()
         self._init_model()
 
-        self.prob = cp.array([])
+        self.phaser = MaxLPhaser(self.dset, self.det, self.size)
+
+        self.prob = None
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
@@ -73,25 +71,26 @@ class EMC():
         self.shifty = self.shifty.ravel()
         self.sphere_dia = self.sphere_dia.ravel()
         self.num_states = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
-        print(self.num_states.prod(), 'sampled states')
+        self.tot_num_states = int(self.num_states.prod())
+        print(self.tot_num_states, 'sampled states')
 
-        self.detector = Detector(self.detector_file)
-        self.x_ind = cp.array(self.detector.cx)
-        self.y_ind = cp.array(self.detector.cy)
+        self.det = Detector(self.detector_file)
+        self.x_ind = cp.array(self.det.cx)
+        self.y_ind = cp.array(self.det.cy)
         self.rad = cp.sqrt(self.x_ind**2 + self.y_ind**2)
-        self.num_pix = self.x_ind.size
+        self.num_pix = self.det.num_pix
         self.size = 2 * int(self.rad.max()) + 3
+        print(self.num_pix, 'pixels with model size =', self.size)
 
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.num_states.prod()))]
-        self.sphere_intens = cp.abs(cp.array(self.sphere_ramps[:int(dia[2])])**2).mean(0)
+        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.tot_num_states))]
 
     def _generate_masks(self):
-        self.invmask = cp.zeros(self.size**2, dtype=cp.bool_)
+        self.invmask = cp.zeros(self.num_pix, dtype=cp.bool_)
         self.invmask[self.rad<4] = True
         self.invmask[self.rad>=self.size//2] = True
         self.intinvmask = self.invmask.astype('i4')
 
-        self.probmask = cp.zeros(self.size**2, dtype='i4')
+        self.probmask = cp.zeros(self.num_pix, dtype='i4')
         self.probmask[self.rad>=self.size//2] = 2
         self.probmask[self.rad<self.size//8] = 1
         self.probmask[self.rad<4] = 2
@@ -111,17 +110,15 @@ class EMC():
         self.powder = self.dset.get_powder()
         etime = time.time()
 
-        if self.rank == 0:
-            print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
-                    (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
-            sys.stdout.flush()
+        print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
+                (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
+        sys.stdout.flush()
 
     def _init_model(self):
         self.model = np.empty((self.size**2,), dtype='c16')
 
-        if self.rank == 0:
-            self._random_model()
-            np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
+        self._random_model()
+        np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
 
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
@@ -137,12 +134,10 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        self.num_states_p = np.arange(self.rank, self.num_states.prod(), self.num_proc).size
-        if self.prob.shape != (self.num_states_p*self.num_rot, self.dset.num_data):
-            self.prob = cp.empty((self.num_states_p*self.num_rot, self.dset.num_data), dtype='f8')
+        if self.prob is None:
+            self.prob = cp.empty((self.tot_num_states*self.num_rot, self.dset.num_data), dtype='f8')
 
         views = cp.empty((self.num_streams, self.num_pix), dtype='f8')
-        intens = cp.empty((self.num_states.prod(), self.num_pix), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -162,10 +157,10 @@ class EMC():
         self.bsize_data = int(np.ceil(num_data_b/32.))
         selmask = (self.probmask < 1)
         sum_views = cp.zeros_like(views)
-        msums = cp.empty(self.num_states_p)
+        msums = cp.empty(self.tot_num_states)
         rot_views = cp.empty_like(views)
 
-        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
+        for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -175,9 +170,9 @@ class EMC():
             sum_views[snum] += views[snum]
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
-        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.num_states_p
+        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
 
-        for i, r in enumerate(range(self.rank, self.num_states.prod(), self.num_proc)):
+        for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
@@ -194,21 +189,13 @@ class EMC():
                          self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
                          -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))
-            if self.rank == 0:
-                sys.stderr.write('\r%d/%d' % (i, self.num_states.prod()))
+            sys.stderr.write('\r%d/%d' % (i, self.tot_num_states))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
-        if self.rank == 0:
-            sys.stderr.write('\n')
+        sys.stderr.write('\n')
 
     def _get_rmax(self):
-        max_exp_p = self.prob.max(0).get()
-        rmax_p = self.prob.argmax(axis=0).get().astype('i4')
-        rmax_p = ((rmax_p//self.num_rot)*self.num_proc + self.rank)*self.num_rot + rmax_p%self.num_rot
-        max_exp = np.empty_like(max_exp_p)
-        self.rmax = np.empty_like(rmax_p)
-
-        rmax_p[max_exp_p != max_exp] = -1
+        self.rmax = self.prob.argmax(axis=0).get().astype('i4')
 
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
