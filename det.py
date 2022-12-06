@@ -55,6 +55,7 @@ class Detector():
             if 'background' in fptr:
                 self.background = fptr['background'][:]
         sys.stderr.write('done\n')
+        self.num_pix = self.qx.size
         self._process_det(mask_flag, keep_mask_1)
 
     def _process_det(self, mask_flag, keep_mask_1):
