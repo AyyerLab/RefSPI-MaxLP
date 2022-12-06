@@ -3,7 +3,7 @@ import h5py
 import cupy as cp
 
 class Dataset():
-    '''Parses sparse photons dataset from HDF5 file
+    '''Parses sparse photons dataset from EMC file
 
     Args:
         photons_file (str): Path to HDF5 photons file
@@ -20,28 +20,23 @@ class Dataset():
         self.photons_file = photons_file
         self.num_pix = num_pix
 
-        with h5py.File(self.photons_file, 'r') as fptr:
-            if self.num_pix != fptr['num_pix'][...]:
+        with open(self.photons_file, 'rb') as fptr:
+            self.num_data, f_num_pix = np.fromfile(fptr, '=i4', count=2)
+            if self.num_pix != f_num_pix:
                 raise AttributeError('Number of pixels in photons file does not match')
-            self.num_data = fptr['place_ones'].shape[0]
-            try:
-                self.ones = cp.array(fptr['ones'][:])
-            except KeyError:
-                self.ones = cp.array([len(fptr['place_ones'][i])
-                                      for i in range(self.num_data)]).astype('i4')
+            _ = np.fromfile(fptr, '=i4', count=254)
+
+            self.ones = cp.fromfile(fptr, '=i4', count=self.num_data)
             self.ones_accum = cp.roll(self.ones.cumsum(), 1)
             self.ones_accum[0] = 0
-            self.place_ones = cp.array(np.hstack(fptr['place_ones'][:]))
 
-            try:
-                self.multi = cp.array(fptr['multi'][:])
-            except KeyError:
-                self.multi = cp.array([len(fptr['place_multi'][i])
-                                       for i in range(self.num_data)]).astype('i4')
+            self.multi = cp.fromfile(fptr, '=i4', count=self.num_data)
             self.multi_accum = cp.roll(self.multi.cumsum(), 1)
             self.multi_accum[0] = 0
-            self.place_multi = cp.array(np.hstack(fptr['place_multi'][:]))
-            self.count_multi = np.hstack(fptr['count_multi'][:])
+
+            self.place_ones = cp.fromfile(fptr, '=i4', count=int(self.ones.sum()))
+            self.place_multi = cp.fromfile(fptr, '=i4', count=int(self.multi.sum()))
+            self.count_multi = np.fromfile(fptr, '=i4', count=int(self.multi.sum()))
 
             self.mean_count = float((self.place_ones.shape[0] +
                                      self.count_multi.sum()
@@ -52,12 +47,8 @@ class Dataset():
                                                     for m, m_a in zip(self.multi.get(),
                                                                       self.multi_accum.get())])
             self.count_multi = cp.array(self.count_multi)
+            self.bg = cp.zeros(self.num_pix)
 
-            try:
-                self.bg = cp.array(fptr['bg'][:]).ravel()
-                print('Using background model with %.2f photons/frame' % self.bg.sum())
-            except KeyError:
-                self.bg = cp.zeros(self.num_pix)
         self.mem = mpool.used_bytes() - init_mem
 
     def get_frame(self, num):
