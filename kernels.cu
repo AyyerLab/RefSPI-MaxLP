@@ -60,8 +60,8 @@ void slice_gen_holo(const complex<double> *model, const double *cx, const double
     complex<double> ramp, sphere ;
 
     double phase = 2. * CUDART_PI * (cx[t] * shiftx + cy[t] * shifty) / size ;
-    double ramp_r = cos(phase) ;
-    double ramp_i = sin(phase) ;
+    double ramp_r, ramp_i ;
+    sincos(phase, &ramp_r, &ramp_i) ;
     ramp = complex<double>(ramp_r, ramp_i) ;
 
     double s = sqrt(cx[t]*cx[t] + cy[t]*cy[t]) * CUDART_PI * diameter / size ;
