@@ -82,14 +82,17 @@ class MaxLPhaser():
         self.shifts = cp.array([sx_vals, sy_vals]).T
         self.diams = cp.array(dia_vals)
         self.ang = cp.array(ang_vals)
+        print('Starting Phaser...')
+
         # -angs maps from model space to detector space
         # +angs maps from detector space to model space
         self.rots = self._get_rot(-self.ang).transpose(2, 0, 1)
+        self._rotate_photons()
 
         num_streams = 4
         streams = [cp.cuda.Stream() for _ in range(num_streams)]
 
-        print('Starting Phaser...')
+        # Calculate with dynamic rescale in thin annulus
         for v in range(self.size**2):
             if not self.rmask[v]:
                 continue
@@ -98,6 +101,7 @@ class MaxLPhaser():
         sys.stderr.write('\n')
         print('Calculated for pixel annulus')
 
+        # Calculate rescale with above estimate
         rescales = np.zeros(self.size**2)
         for v in range(self.size**2):
             if not self.rmask[v]:
@@ -108,8 +112,11 @@ class MaxLPhaser():
         rescale = np.mean(rescales[self.rmask.get()])
         print('Estimated rescale:', rescale)
 
+        # Reset fconv after rescale calculation
+        fconv = cp.array(model).copy().ravel()
+
+        # Calculate with fixed rescale over whole volume
         for v in range(self.size**2):
-        #for v in range(10000):
             if not self.mask[v]:
                 continue
             fconv[v] = self.run_pixel_pattern(fconv[v], v, rescale=rescale, num_iter=10)
@@ -123,6 +130,26 @@ class MaxLPhaser():
         c = cp.cos(ang)
         s = cp.sin(ang)
         return cp.array([[c, -s], [s, c]])
+
+    def _rotate_photons(self):
+        '''Generate model-space rotated sparse photons file'''
+        pindices = self.photons.indices
+        cx = self.dx[self.photons.indices]
+        cy = self.dy[self.photons.indices]
+        mindices = cp.empty_like(self.photons.indices)
+        for d in range(self.num_data):
+            s = self.photons.indptr[d]
+            e = self.photons.indptr[d+1]
+            rx = cp.rint(self.rots[d,0,0]*cx[s:e] + self.rots[d,0,1]*cy[s:e]).astype(self.photons.indices.dtype)
+            ry = cp.rint(self.rots[d,1,0]*cx[s:e] + self.rots[d,1,0]*cy[s:e]).astype(self.photons.indices.dtype)
+            mindices[s:e] = rx*self.size + ry
+
+        self.mphotons = sparse.csr_matrix((self.photons.data,
+                                           mindices,
+                                           self.photons.indptr),
+                                          shape=(self.num_data, self.size**2),
+                                          copy=False)
+        print('Rotated photons')
 
     def run_pixel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
         '''Optimize model for given model voxel v using pattern search'''
@@ -162,8 +189,12 @@ class MaxLPhaser():
             is not sampled. This can be precalculated from the detector file.
             We need to use that list, and the input angles to get the relevant
             subset_d_vals to be processed for that pixel.
-
         '''
+        #rotpix = (self.rots[d_vals] @ self.dqvals[:,v])*self.size + self.size//2
+        #x, y = cp.rint(rotpix).astype('i4').T
+        #v_vals = x * self.size + y
+        #return self.photons[d_vals, v_vals]
+
         if self._photons_rotated:
             return self.photons_t[v, d_vals].toarray()
 
@@ -174,11 +205,6 @@ class MaxLPhaser():
         else:
             t_nearest = 0
         return self.photons_t[t_nearest, d_vals]
-
-        #rotpix = (self.rots[d_vals] @ self.dqvals[:,v])*self.size + self.size//2
-        #x, y = cp.rint(rotpix).astype('i4').T
-        #v_vals = x * self.size + y
-        #return self.photons[d_vals, v_vals]
 
     def get_fref_d(self, d_vals, v):
         '''Get predicted intensities for frame list d_vals at model voxel v'''

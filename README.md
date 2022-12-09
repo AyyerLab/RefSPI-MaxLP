@@ -8,7 +8,7 @@ Maximum Likelihood Phaser (MaxLP) for holographic, or reference-enhanced single 
 For experimental data processing, we need the following things:
  * [DONE] Incorporate detector file and separate model voxel and detector pixel semantically
  * [DONE] Improve initial guess to scale-match the sphere model
- * Generate rotated photons file in model space (N_data, N_voxels)
+ * [DONE] Generate rotated photons file in model space (N_data, N_voxels)
  * Generate list of relevant frames for each model voxel (based on angle estimate)
  * Incorporate fluence variations (assume known). Relative cross-section same across frames.
  * Parallelize over multiple GPUs (multiprocessing)
