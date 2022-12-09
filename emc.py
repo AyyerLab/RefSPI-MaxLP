@@ -136,7 +136,8 @@ class EMC():
             #self.prob = cp.empty((self.tot_num_states*self.num_rot, self.dset.num_data), dtype='f8')
             self.prob = cp.empty((self.tot_num_states*self.num_rot, BATCH_SIZE), dtype='f8')
 
-        views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
+        #views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
+        views = cp.empty((self.tot_num_states, self.det.num_pix), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -164,16 +165,16 @@ class EMC():
         selmask = (self.probmask < 1)
         sum_views = cp.zeros_like(views)
         msums = cp.empty(self.tot_num_states)
-        rot_views = cp.empty_like(views)
+        rot_views = cp.zeros((self.num_streams, self.det.num_pix))
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_pixel,), (32,),
                     (dmodel, self.cx, self.cy, self.shiftx[r], self.shifty[r], 
-                     self.sphere_dia[r], 1., 1., self.size, self.det.num_pix, self.dset.bg, 0, views[snum]))
-            msums[i] = views[snum][selmask].sum()
-            sum_views[snum] += views[snum]
+                     self.sphere_dia[r], 1., 1., self.size, self.det.num_pix, self.dset.bg, 0, views[i]))
+            msums[i] = views[i][selmask].sum()
+            sum_views[snum] += views[i]
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
         vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
@@ -181,13 +182,10 @@ class EMC():
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            self.k_slice_gen_holo((self.bsize_pixel,)*2, (32,)*2,
-                    (dmodel, self.cx, self.cy, self.shiftx[r], self.shifty[r], 
-                     self.sphere_dia[r], 1., 1., self.size, self.det.num_pix, self.dset.bg, 0, views[snum]))
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (views[snum], self.cx, self.cy, j*np.pi/self.num_rot, 1.,
+                        (views[i], self.cx, self.cy, j*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
                         (rot_views[snum], self.probmask, e - s,
