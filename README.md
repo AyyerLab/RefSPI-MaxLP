@@ -9,8 +9,8 @@ For experimental data processing, we need the following things:
  * [DONE] Incorporate detector file and separate model voxel and detector pixel semantically
  * [DONE] Improve initial guess to scale-match the sphere model
  * [DONE] Generate rotated photons file in model space (N_data, N_voxels)
- * Generate list of relevant frames for each model voxel (based on angle estimate)
- * Incorporate fluence variations (assume known). Relative cross-section same across frames.
+ * [DONE] Generate list of relevant frames for each model voxel (based on angle estimate)
+ * Incorporate fluence variations (assume known). Relative cross-section between particle and reference same across frames.
  * Parallelize over multiple GPUs (multiprocessing)
  * Improve performance of maxLP by precalculating/caching/memoizing
 
