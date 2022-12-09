@@ -43,6 +43,8 @@ class EMC():
         self._init_model()
 
         self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
+        self.phaser.get_sampled_mask(cp.arange(self.num_rot)*np.pi/self.num_rot)
+        #np.save(self.output_folder+'/sampled.npy', self.phaser.sampled_mask)
 
         self.prob = None
         self.bsize_pixel = int(np.ceil(self.det.num_pix/32.))
