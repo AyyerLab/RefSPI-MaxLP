@@ -14,10 +14,6 @@ class MaxLPhaser():
         self._gen_pattern(num_pattern)
         self._preproc_data(num_data)
         self._get_qvals()
-        self._photons_rotated = False
-
-        self.counts = cp.array(self.photons.sum(1))[:,0]
-        self.mean_count = self.counts.mean()
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -41,12 +37,14 @@ class MaxLPhaser():
 
         po_csr = sparse.csr_matrix((cp.ones_like(self.dset.place_ones, dtype='f8'),
                                     self.dset.place_ones,
-                                    cp.append(self.dset.ones_accum, len(self.dset.place_ones)),
-                                   ), shape=(self.dset.num_data, self.det.num_pix))
+                                    cp.append(self.dset.ones_accum, len(self.dset.place_ones)),),
+                                   shape=(self.dset.num_data, self.det.num_pix),
+                                   copy=False)
         pm_csr = sparse.csr_matrix((self.dset.count_multi.astype('f8'),
                                     self.dset.place_multi,
-                                    cp.append(self.dset.multi_accum, len(self.dset.place_multi)),
-                                   ), shape=(self.dset.num_data, self.det.num_pix))
+                                    cp.append(self.dset.multi_accum, len(self.dset.place_multi)),),
+                                   shape=(self.dset.num_data, self.det.num_pix),
+                                   copy=False)
 
         # photons = K_dt
         self.photons = (po_csr + pm_csr)[:self.num_data]
@@ -76,6 +74,24 @@ class MaxLPhaser():
         self.rmask = (self.mrad > 0.10*self.size) & (self.mrad < 0.11*self.size)
         # Ring mask for second rescale estimate, closer to low q (model level)
         self.nmask = (self.mrad > 0.10*self.size) & (self.mrad < 0.11*self.size)
+
+    def get_sampled_mask(self, ang_samples):
+        '''Generate bitmask arrays of (N_samples/64, N_voxels)
+        which gives whether that voxel is sampled for a given angle
+        Each volume contains bitmasks for up to 64 angle samples
+        '''
+        self.sampled_mask = cp.zeros((int(np.ceil(len(ang_samples) / 64)), self.size**2), dtype='u8')
+        self.ang_samples = ang_samples
+
+        cen = self.size // 2
+        for i, ang in enumerate(ang_samples):
+            slice_ind = i // 64
+            bit_shift = i % 64
+            rot = self._get_rot(-ang)
+            rx = cp.rint(rot[0,0]*self.dx + rot[0,1]*self.dy + cen).astype('i4')
+            ry = cp.rint(rot[1,0]*self.dx + rot[1,1]*self.dy + cen).astype('i4')
+            self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
+        print('Generated sampled_mask matrix')
 
     def run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
         fconv = cp.array(model).copy().ravel()
@@ -137,11 +153,12 @@ class MaxLPhaser():
         cx = self.dx[self.photons.indices]
         cy = self.dy[self.photons.indices]
         mindices = cp.empty_like(self.photons.indices)
+        cen = self.size // 2
         for d in range(self.num_data):
             s = self.photons.indptr[d]
             e = self.photons.indptr[d+1]
-            rx = cp.rint(self.rots[d,0,0]*cx[s:e] + self.rots[d,0,1]*cy[s:e]).astype(self.photons.indices.dtype)
-            ry = cp.rint(self.rots[d,1,0]*cx[s:e] + self.rots[d,1,0]*cy[s:e]).astype(self.photons.indices.dtype)
+            rx = cp.rint(self.rots[d,0,0]*cx[s:e] + self.rots[d,0,1]*cy[s:e] + cen).astype('i4')
+            ry = cp.rint(self.rots[d,1,0]*cx[s:e] + self.rots[d,1,1]*cy[s:e] + cen).astype('i4')
             mindices[s:e] = rx*self.size + ry
 
         self.mphotons = sparse.csr_matrix((self.photons.data,
@@ -168,43 +185,22 @@ class MaxLPhaser():
         return fobj_v
 
     def get_pixel_constants(self, v , frac=None):
-        d_vals = cp.arange(self.num_data)
+        good_angs = cp.zeros((0,), dtype='i4')
+        for i in range(len(self.sampled_mask)):
+            slice_good_angs = cp.where(self.sampled_mask[i,v] & (1 << cp.arange(64, dtype='u8')) > 0)[0]
+            good_angs = cp.append(good_angs, slice_good_angs)
+        good_angs = self.ang_samples[good_angs]
+        d_vals = cp.where(cp.isin(self.ang, good_angs))[0]
+        
         if frac is not None:
             d_vals = cp.random.choice(d_vals, int(cp.round(self.num_data*frac)), replace=False)
 
-        return {'k_d': self.get_photons_pixel(d_vals, v),
-                'fref_d': self.get_fref_d(d_vals, v)}
+        out_dict = {}
+        out_dict['d_vals'] = d_vals
+        out_dict['k_d'] = self.mphotons[d_vals, v].transpose()
+        out_dict['fref_d'] = self.get_fref_d(d_vals, v)
 
-    def get_photons_pixel(self, d_vals, v):
-        '''Obtains photons for each frame for a given model voxel v
-
-        CURRENTLY DOES NOT WORK
-
-        Need to do two steps:
-        1. Create sparse photons array where indices are in model space
-            (the specific index will depend upon the angle)
-            with shape (num_voxels, num_data). But an empty value doesn't
-            necessarily mean 0 photons.
-        2. For each pixel, there is a list of angles for which that pixel
-            is not sampled. This can be precalculated from the detector file.
-            We need to use that list, and the input angles to get the relevant
-            subset_d_vals to be processed for that pixel.
-        '''
-        #rotpix = (self.rots[d_vals] @ self.dqvals[:,v])*self.size + self.size//2
-        #x, y = cp.rint(rotpix).astype('i4').T
-        #v_vals = x * self.size + y
-        #return self.photons[d_vals, v_vals]
-
-        if self._photons_rotated:
-            return self.photons_t[v, d_vals].toarray()
-
-        # Ignoring rotation...
-        distsq_t = (self.mx[v] - self.dx)**2 + (self.my[v] - self.dy)**2
-        if distsq_t.min() < 4:
-            t_nearest = distsq_t.argmin()
-        else:
-            t_nearest = 0
-        return self.photons_t[t_nearest, d_vals]
+        return out_dict
 
     def get_fref_d(self, d_vals, v):
         '''Get predicted intensities for frame list d_vals at model voxel v'''
