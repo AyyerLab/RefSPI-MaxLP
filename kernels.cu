@@ -5,13 +5,13 @@
 extern "C" {
 
 __global__
-void slice_gen(const double *model, const double angle, const double scale, const long long size,
+void slice_gen(const double *model, const double *cx, const double *cy,
+               const double angle, const double scale,
+               const long long size, const long long num_pix,
                const double *bg, const long long log_flag, double *view) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x ;
-    int y = blockIdx.y * blockDim.y + threadIdx.y ;
-    if (x > size - 1 || y > size - 1)
+    int t = blockIdx.x * blockDim.x + threadIdx.x ;
+    if (t > num_pix - 1)
         return ;
-    int t = x*size + y ;
     if (log_flag)
         view[t] = -1000. ;
     else
@@ -19,18 +19,18 @@ void slice_gen(const double *model, const double angle, const double scale, cons
 
     int cen = size / 2 ;
     double ac = cos(angle), as = sin(angle) ;
-    double tx = (x - cen) * ac - (y - cen) * as + cen ;
-    double ty = (x - cen) * as + (y - cen) * ac + cen ;
+    double tx = cx[t] * ac - cy[t] * as + cen ;
+    double ty = cx[t] * as + cy[t] * ac + cen ;
     int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
     if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
         return ;
 
     double fx = tx - ix, fy = ty - iy ;
-    double cx = 1. - fx, cy = 1. - fy ;
+    double gx = 1. - fx, gy = 1. - fy ;
 
-    view[t] = model[ix*size + iy]*cx*cy +
-              model[(ix+1)*size + iy]*fx*cy +
-              model[ix*size + (iy+1)]*cx*fy +
+    view[t] = model[ix*size + iy]*gx*gy +
+              model[(ix+1)*size + iy]*fx*gy +
+              model[ix*size + (iy+1)]*gx*fy +
               model[(ix+1)*size + (iy+1)]*fx*fy ;
     view[t] *= scale ;
     view[t] += bg[t] ;
@@ -43,14 +43,14 @@ void slice_gen(const double *model, const double angle, const double scale, cons
 }
 
 __global__
-void slice_gen_holo(const complex<double> *model, const double shiftx, const double shifty,
-               const double diameter, const double rel_scale, const double scale, const long long size,
-               const double *bg, const long long log_flag, double *view) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x ;
-    int y = blockIdx.y * blockDim.y + threadIdx.y ;
-    if (x > size - 1 || y > size - 1)
+void slice_gen_holo(const complex<double> *model, const double *cx, const double *cy,
+                    const double shiftx, const double shifty, const double diameter,
+                    const double rel_scale, const double scale,
+                    const long long size, const long long num_pix,
+                    const double *bg, const long long log_flag, double *view) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x ;
+    if (t > num_pix - 1)
         return ;
-    int t = x*size + y ;
     if (log_flag)
         view[t] = -1000. ;
     else
@@ -59,17 +59,16 @@ void slice_gen_holo(const complex<double> *model, const double shiftx, const dou
     double cen = floor(size / 2.) ;
     complex<double> ramp, sphere ;
 
-    double phase = 2. * CUDART_PI * ((x-cen) * shiftx + (y-cen) * shifty) / size ;
+    double phase = 2. * CUDART_PI * (cx[t] * shiftx + cy[t] * shifty) / size ;
     double ramp_r = cos(phase) ;
     double ramp_i = sin(phase) ;
     ramp = complex<double>(ramp_r, ramp_i) ;
 
-    double s = sqrt((x-cen)*(x-cen) + (y-cen)*(y-cen)) * CUDART_PI * diameter / size ;
-    if (s == 0.)
-        s = 1.e-5 ;
+    double s = sqrt(cx[t]*cx[t] + cy[t]*cy[t]) * CUDART_PI * diameter / size ;
     sphere = complex<double>(rel_scale*(sin(s) - s*cos(s)) / (s*s*s), 0) ;
 
-    complex<double> cview = ramp * sphere + model[t] ;
+    int ix = __double2int_rn(cx[t] + cen), iy = __double2int_rn(cy[t] + cen) ;
+    complex<double> cview = ramp * sphere + model[ix*size + iy] ;
     view[t] = pow(abs(cview), 2.) ;
 
     view[t] *= scale ;
@@ -80,38 +79,6 @@ void slice_gen_holo(const complex<double> *model, const double shiftx, const dou
         else
             view[t] = log(view[t]) ;
     }
-}
-
-__global__
-void slice_merge(const double *view, const double angle, const long long size,
-                 double *model, double *mweights) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x ;
-    int y = blockIdx.y * blockDim.y + threadIdx.y ;
-    if (x > size - 1 || y > size - 1)
-        return ;
-    int t = x*size + y ;
-
-    int cen = size / 2 ;
-    double ac = cos(angle), as = sin(angle) ;
-    double tx = (x - cen) * ac - (y - cen) * as + cen ;
-    double ty = (x - cen) * as + (y - cen) * ac + cen ;
-    int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
-    if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
-        return ;
-    double fx = tx - ix, fy = ty - iy ;
-    double cx = 1. - fx, cy = 1. - fy ;
-
-    atomicAdd(&model[ix*size + iy], view[t]*cx*cy) ;
-    atomicAdd(&mweights[ix*size + iy], cx*cy) ;
-
-    atomicAdd(&model[(ix+1)*size + iy], view[t]*fx*cy) ;
-    atomicAdd(&mweights[(ix+1)*size + iy], fx*cy) ;
-
-    atomicAdd(&model[ix*size + (iy+1)], view[t]*cx*fy) ;
-    atomicAdd(&mweights[ix*size + (iy+1)], cx*fy) ;
-
-    atomicAdd(&model[(ix+1)*size + (iy+1)], view[t]*fx*fy) ;
-    atomicAdd(&mweights[(ix+1)*size + (iy+1)], fx*fy) ;
 }
 
 __global__
@@ -138,55 +105,22 @@ void calc_prob_all(const double *lview, const int *mask, const long long ndata, 
 }
 
 __global__
-void merge_all(const double *prob_r, const long long ndata, const int *ones, const int *multi,
-               const long long *o_acc, const long long *m_acc, const int *p_o, const int *p_m,
-               const int *c_m, double *view) {
-    long long d, t ;
-    d = blockDim.x * blockIdx.x + threadIdx.x ;
-    if (d >= ndata)
-        return ;
-
-    for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t)
-        atomicAdd(&view[p_o[t]], prob_r[d]) ;
-    for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t)
-        atomicAdd(&view[p_m[t]], prob_r[d] * c_m[t]) ;
-}
-
-__global__
-void proj_divide(const complex<double> *iter_in, const double *fobs, const complex<double> *sphere_ramp,
-                 const int *invmask, const long long size, complex<double> *iter_out) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x ;
-    if (t >= size*size)
-        return ;
-
-    complex<double> shifted ;
-
-    if (invmask[t] == 0) {
-        shifted = iter_in[t] + sphere_ramp[t] ;
-        iter_out[t] = shifted * fobs[t] / abs(shifted) - sphere_ramp[t] ;
-    }
-    else {
-        iter_out[t] = iter_in[t] ;
-    }
-}
-
-__global__
-void get_f_dt(const complex<double> *fobj_t, const complex<double> *fref_d,
+void get_f_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
               const long long ndata, const long long npix,
-              complex<double> *f_dt) {
-    long long d, t ;
+              complex<double> *f_dv) {
+    long long d, v ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
 
-    for (t = 0 ; t < npix ; ++t)
-        f_dt[d*npix + t] = fobj_t[t] + fref_d[d] ;
+    for (v = 0 ; v < npix ; ++v)
+        f_dv[d*npix + v] = fobj_v[v] + fref_d[d] ;
 }
 
 __global__
 void get_logq_pixel(const complex<double> *fobj, const long long *pixels, const double rescale,
                     const double *diams, const double *shifts, const double *qvals,
-					const int *indptr, const int *indices, const double *data,
+                    const int *indptr, const int *indices, const double *data,
                     const long long ndata, const long long npix, double *logq_td) {
     long long d, t ;
     t = blockDim.x * blockIdx.x + threadIdx.x ;
@@ -196,8 +130,8 @@ void get_logq_pixel(const complex<double> *fobj, const long long *pixels, const 
     long long pix = pixels[t] ;
     double qx = qvals[pix*2 + 0], qy = qvals[pix*2 + 1] ;
     double fobj_tx = fobj[pix].real(), fobj_ty = fobj[pix].imag() ;
-	int ind_st = indptr[pix], num_ind = indptr[pix+1] - ind_st ;
-	int ind_pos = 0 ;
+    int ind_st = indptr[pix], num_ind = indptr[pix+1] - ind_st ;
+    int ind_pos = 0 ;
 
     double s, sphere_ft, w ;
     double rampx, rampy ;
@@ -209,19 +143,19 @@ void get_logq_pixel(const complex<double> *fobj, const long long *pixels, const 
         sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
         sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampy, &rampx) ;
 
-		w = rescale * (pow(fobj_tx + sphere_ft*rampx, 2.) + pow(fobj_ty + sphere_ft*rampy, 2.)) ;
+        w = rescale * (pow(fobj_tx + sphere_ft*rampx, 2.) + pow(fobj_ty + sphere_ft*rampy, 2.)) ;
         logq_td[t*ndata + d] = -w ;
 
-		// Assuming sorted indices
-		// Assuming photon data is "rotated"
-		if (indices[ind_st + ind_pos] == d) {
-			logq_td[t*ndata + d] += data[ind_st + ind_pos] * log(w) ;
-			ind_pos++ ;
-		}
+        // Assuming sorted indices
+        // Assuming photon data is "rotated"
+        if (indices[ind_st + ind_pos] == d) {
+            logq_td[t*ndata + d] += data[ind_st + ind_pos] * log(w) ;
+            ind_pos++ ;
+        }
 
-		// Skipping when reaching end of frames indices
-		if (ind_pos > num_ind)
-			break ;
+        // Skipping when reaching end of frames indices
+        if (ind_pos > num_ind)
+            break ;
     }
 }
 
@@ -256,36 +190,36 @@ bool isin(int *array, int length, int val) {
 
 __global__
 void rotate_photons(const int *indptr, const double *angles,
-		            const long long ndata, const long long size,
-					int *indices) {
+                    const long long ndata, const long long size,
+                    int *indices) {
     long long d ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
 
-	// indices and indptr are for ndata x npix CSR matrix (emc-like)
-	int ind_st = indptr[d], ind_en = indptr[d+1] ;
-	int t, pix ;
-	double tx, ty, rx, ry ;
-	int ints = size, cen = size / 2 ;
-	double c = cos(angles[d]), s = sin(angles[d]) ;
+    // indices and indptr are for ndata x npix CSR matrix (emc-like)
+    int ind_st = indptr[d], ind_en = indptr[d+1] ;
+    int t, pix ;
+    double tx, ty, rx, ry ;
+    int ints = size, cen = size / 2 ;
+    double c = cos(angles[d]), s = sin(angles[d]) ;
     int ix, iy, pos[4], i ;
 
-	for (t = ind_st ; t < ind_en ; ++t) {
-		pix = indices[t] ;
-		tx = pix / size - cen ;
-		ty = pix % size - cen ;
-		rx = c*tx - s*ty ;
-		ry = s*tx + c*ty ;
+    for (t = ind_st ; t < ind_en ; ++t) {
+        pix = indices[t] ;
+        tx = pix / size - cen ;
+        ty = pix % size - cen ;
+        rx = c*tx - s*ty ;
+        ry = s*tx + c*ty ;
 
         ix = min(max(__double2int_rn(rx + cen), 0), ints - 1) ;
         iy = min(max(__double2int_rn(ry + cen), 0), ints - 1) ;
 
-		// 0-th order interpolation
-		// Need trick to avoid repetition
-		//indices[t] = pos[0] ;
-		indices[t] = ix * size + iy ;
-	}
+        // 0-th order interpolation
+        // Need trick to avoid repetition
+        //indices[t] = pos[0] ;
+        indices[t] = ix * size + iy ;
+    }
 
 }
 
@@ -297,9 +231,9 @@ void deduplicate(const int *indptr, const long long ndata,
     if (d >= ndata)
         return ;
 
-	// indices and indptr are for ndata x npix CSR matrix (emc-like)
-	int ind_st = indptr[d], ind_en = indptr[d+1] ;
-	int t, pix, ix, iy, i ;
+    // indices and indptr are for ndata x npix CSR matrix (emc-like)
+    int ind_st = indptr[d], ind_en = indptr[d+1] ;
+    int t, pix, ix, iy, i ;
     int pos[8] ;
 
     for (t = ind_st ; t < ind_en ; ++t) {
