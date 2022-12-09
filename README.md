@@ -4,6 +4,16 @@ Maximum Likelihood Phaser (MaxLP) for holographic, or reference-enhanced single 
  * K Ayyer, "Reference-enhanced x-ray single-particle imaging." [Optica 7.6 (2020): 593-601](https://doi.org/10.1364/OPTICA.391373)
  * A Mall & K Ayyer, "Holographic single particle imaging for weakly scattering, heterogeneous nanoscale objects." [arXiv:2210.10611](https://arxiv.org/abs/2210.10611)
 
+## ToDos
+For experimental data processing, we need the following things:
+ * [DONE] Incorporate detector file and separate model voxel and detector pixel semantically
+ * [DONE] Improve initial guess to scale-match the sphere model
+ * Generate rotated photons file in model space (N_data, N_voxels)
+ * Generate list of relevant frames for each model voxel (based on angle estimate)
+ * Incorporate fluence variations (assume known). Relative cross-section same across frames.
+ * Parallelize over multiple GPUs (multiprocessing)
+ * Improve performance of maxLP by precalculating/caching/memoizing
+
 ## Installation
 This is a pure python 3 package, which has the following dependencies:
  * cupy, which in turn needs CUDA
