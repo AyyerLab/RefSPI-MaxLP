@@ -15,7 +15,7 @@ from scipy import ndimage, special
 
 from det import Detector
 from dset import Dataset
-from maxLP import MaxLPhaser
+from max_lp import MaxLPhaser
 
 P_MIN = 1.e-6
 BATCH_SIZE = 10000
