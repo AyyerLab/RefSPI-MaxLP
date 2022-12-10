@@ -116,14 +116,16 @@ class EMC():
 
     def _init_model(self):
         self.model = np.empty((self.size**2,), dtype='c16')
-
         self._random_model()
-        np.save(op.join(self.output_folder, 'model_000.npy'), self.model)
 
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
+
+        with h5py.File(op.join(self.output_folder, 'output_000.h5', 'r')) as f:
+            f['model'] = self.model
+            f['scale'] = self.scales
 
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMC algorithm
