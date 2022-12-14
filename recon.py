@@ -39,7 +39,7 @@ def main():
         recon.run_iteration(i+1)
         etime = time.time()
         sys.stderr.write('\r%d/%d (%f s)\n'% (i+1, args.num_iter, etime-stime))
-        norm = float(cp.linalg.norm(cp.array(recon.model) - m0))
+        norm = float(cp.linalg.norm(cp.array(recon.model.ravel()) - m0.ravel()))
         logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
         print('Change from last iteration: ', norm)
         logf.flush()
