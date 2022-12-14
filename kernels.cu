@@ -118,26 +118,26 @@ void get_w_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
 }
 
 __global__
-void get_logq_pixel(const complex<double> *fobj, const long long *pixels, const double rescale,
+void get_logq_pixel(const complex<double> *fobj, const double rescale, const bool *mask,
                     const double *diams, const double *shifts, const double *qvals,
                     const int *indptr, const int *indices, const double *data,
-                    const long long ndata, const long long npix, double *logq_td) {
+                    const long long ndata, const long long nvox, double *logq_td) {
     long long d, t ;
     t = blockDim.x * blockIdx.x + threadIdx.x ;
-    if (t >= npix)
-        return ;
+    if (t >= nvox || (!mask[t]))
+		return ;
 
-    long long pix = pixels[t] ;
-    double qx = qvals[pix*2 + 0], qy = qvals[pix*2 + 1] ;
-    double fobj_tx = fobj[pix].real(), fobj_ty = fobj[pix].imag() ;
-    int ind_st = indptr[pix], num_ind = indptr[pix+1] - ind_st ;
+    double qx = qvals[t*3 + 0], qy = qvals[t*3 + 1], qrad = qvals[t*3 + 2] ;
+    double fobj_tx = fobj[t].real(), fobj_ty = fobj[t].imag() ;
+	// indptr, indices, data refer to (N_voxel, N_data) sparse array
+    int ind_st = indptr[t], num_ind = indptr[t+1] - ind_st ;
     int ind_pos = 0 ;
 
     double s, sphere_ft, w ;
     double rampx, rampy ;
 
     for (d = 0 ; d < ndata ; ++d) {
-        s = CUDART_PI * sqrt(qx*qx + qy*qy) * diams[d] ;
+        s = CUDART_PI * qrad * diams[d] ;
         if (s == 0.)
             s = 1.e-8 ;
         sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
