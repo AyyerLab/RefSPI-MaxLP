@@ -123,9 +123,9 @@ class EMC():
         else:
             self.scales = cp.ones(self.dset.num_data, dtype='f8')
 
-        with h5py.File(op.join(self.output_folder, 'output_000.h5', 'r')) as f:
+        with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
             f['model'] = self.model
-            f['scale'] = self.scales
+            f['scale'] = self.scales.get()
 
     def run_iteration(self, iternum=None):
         '''Run one iterations of EMC algorithm
@@ -201,7 +201,8 @@ class EMC():
             sys.stderr.write('\rBatch %d: %d/%d    ' % (s//BATCH_SIZE, i+1, self.tot_num_states))
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
-        return self.prob.argmax(axis=0).get().astype('i4')
+        #return self.prob.argmax(axis=0).get().astype('i4')
+        return self.prob.argmax(axis=0).get()
 
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
@@ -238,8 +239,8 @@ class EMC():
             temp[censlice] = np.random.random(censhape)
             temp = ndimage.gaussian_filter(temp, i+0.5)
             rmodel += (temp - temp[censlice].min())
-        self.model = cp.array(np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))).ravel()
-        self.model *= 8e-9 * (cp.abs(self.model)**2).mean()
+        self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
+        self.model *= 8e-9 * (np.abs(self.model)**2).mean()
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.cx*self.shiftx[n] + self.cy*self.shifty[n])/self.size)
