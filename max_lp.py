@@ -14,6 +14,8 @@ class MaxLPhaser():
         self._gen_pattern(num_pattern)
         self._preproc_data(num_data)
         self._get_qvals()
+        self.logq_td = cp.zeros((self.size**2, self.num_data)) # TODO: Batch logq_td
+        self.tot_logq_t = cp.empty((len(self.pattern), self.size**2))
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -66,6 +68,7 @@ class MaxLPhaser():
         self.mx = self.mx.ravel()
         self.my = self.my.ravel()
         self.mrad = cp.sqrt(self.mx**2 + self.my**2)
+        self.mqvals = cp.ascontiguousarray(cp.array([self.mx, self.my, self.mrad]).T / self.size)
 
         #TODO: Important!! Generalize these thresholds
         # Model level mask for voxels to run MaxLP on
@@ -143,7 +146,7 @@ class MaxLPhaser():
             sys.stderr.write('\r%d/%d'%(v+1, self.size**2))
         sys.stderr.write('\n')
         print('Phasing done..')
-        
+
         #return fconv
         return 0.5 * (fconv + fconv.conj().reshape(self.size, self.size)[::-1,::-1].ravel())
 
@@ -172,6 +175,8 @@ class MaxLPhaser():
                                           shape=(self.num_data, self.size**2),
                                           copy=False)
         self.mphotons_t = self.mphotons.transpose().tocsr()
+        self.mphotons_t.sort_indices()
+        self.mphotons_t.sum_duplicates()
         print('Rotated photons')
 
     def run_pixel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
@@ -209,7 +214,7 @@ class MaxLPhaser():
             good_angs = cp.append(good_angs, slice_good_angs)
         good_angs = self.ang_samples[good_angs]
         d_vals = cp.where(cp.isin(self.ang, good_angs))[0]
-        
+
         if frac is not None:
             d_vals = cp.random.choice(d_vals, int(cp.round(self.num_data*frac)), replace=False)
 
@@ -262,3 +267,29 @@ class MaxLPhaser():
                         (fobj_v, const['fref_d'], len(const['fref_d']), len(fobj_v), f_dv))
 
         return const['k_d'].mean() / (cp.abs(f_dv)**2).mean(0)
+
+    def run_all_pattern(self, fobj, rescale, num_iter=10):
+        fmag = cp.abs(fobj)
+        step = fmag / 4.
+        curr_mask = self.mask.copy()
+        num_pattern = len(self.pattern)
+        pattern_size = num_pattern**0.5
+
+        for i in range(num_iter):
+            for j in range(num_pattern):
+                curr_fobj = fobj + self.pattern[j]*step
+                self.logq_td[:] = 0
+                self.k_get_logq_pixel((self.size**2,), (1,),
+                                      (curr_fobj, 1.,  curr_mask,
+                                       self.diams, self.shifts, self.mqvals,
+                                       self.mphotons_t.indptr, self.mphotons_t.indices,
+                                       self.mphotons_t.data,
+                                       self.dset.num_data, self.size**2, self.logq_td))
+                self.tot_logq_t[j] = self.logq_td.sum(1)
+                sys.stderr.write('\r%d/%d: %d/%d    '%(i+1, num_iter, j+1, num_pattern))
+            j_best = self.tot_logq_t[j].argmax(0)
+            step[j_best == num_pattern // 2] /= pattern_size
+            curr_mask[step/fmag < 1e-3] = False
+            fobj += self.pattern[j_best] * step
+        sys.stderr.write('\n')
+        return fobj
