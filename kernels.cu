@@ -105,16 +105,16 @@ void calc_prob_all(const double *lview, const int *mask, const long long ndata, 
 }
 
 __global__
-void get_f_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
+void get_w_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
               const long long ndata, const long long npix,
-              complex<double> *f_dv) {
+              const double rescale, double *w_dv) {
     long long d, v ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
 
     for (v = 0 ; v < npix ; ++v)
-        f_dv[d*npix + v] = fobj_v[v] + fref_d[d] ;
+        w_dv[d*npix + v] = rescale * pow(abs(fobj_v[v] + fref_d[d]), 2.) ;
 }
 
 __global__

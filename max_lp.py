@@ -18,7 +18,7 @@ class MaxLPhaser():
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
-        self.k_get_f_dv = kernels.get_function('get_f_dv')
+        self.k_get_w_dv = kernels.get_function('get_w_dv')
         self.k_get_logq_pixel = kernels.get_function('get_logq_pixel')
         self.k_rotate_photons = kernels.get_function('rotate_photons')
         self.k_deduplicate = kernels.get_function('deduplicate')
@@ -69,7 +69,8 @@ class MaxLPhaser():
 
         #TODO: Important!! Generalize these thresholds
         # Model level mask for voxels to run MaxLP on
-        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1)
+        #self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1)
+        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1 - 220)
         # Ring mask for first rescale estimate (model level)
         self.rmask = (self.mrad > 0.10*self.size) & (self.mrad < 0.11*self.size)
         # Ring mask for second rescale estimate, closer to low q (model level)
@@ -105,6 +106,7 @@ class MaxLPhaser():
         self.rots = self._get_rot(-self.ang).transpose(2, 0, 1)
         self._rotate_photons()
 
+        '''
         num_streams = 4
         streams = [cp.cuda.Stream() for _ in range(num_streams)]
 
@@ -130,6 +132,8 @@ class MaxLPhaser():
 
         # Reset fconv after rescale calculation
         fconv = cp.array(model).copy().ravel()
+        '''
+        rescale = 1.
 
         # Calculate with fixed rescale over whole volume
         for v in range(self.size**2):
@@ -139,8 +143,9 @@ class MaxLPhaser():
             sys.stderr.write('\r%d/%d'%(v+1, self.size**2))
         sys.stderr.write('\n')
         print('Phasing done..')
-
-        return fconv
+        
+        #return fconv
+        return 0.5 * (fconv + fconv.conj().reshape(self.size, self.size)[::-1,::-1].ravel())
 
     def _get_rot(self, ang):
         c = cp.cos(ang)
@@ -166,6 +171,7 @@ class MaxLPhaser():
                                            self.photons.indptr),
                                           shape=(self.num_data, self.size**2),
                                           copy=False)
+        self.mphotons_t = self.mphotons.transpose().tocsr()
         print('Rotated photons')
 
     def run_pixel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
@@ -173,14 +179,26 @@ class MaxLPhaser():
         const_v = self.get_pixel_constants(v, frac=frac)
         step = cp.abs(fobj_v) / 4.
 
+        curr_fobj_v = cp.empty(self.pattern.shape, dtype=fobj_v.dtype)
+        w_dv = cp.empty((len(const_v['fref_d']), len(curr_fobj_v)), dtype='c16')
+        bsize = int(cp.ceil(len(const_v['fref_d'])/32.))
+        wshape = w_dv.shape
+
         for i in range(num_iter):
-            fobj_v_new, step_new = self.iterate_pixel_pattern(fobj_v, v, step,
-                                                              const=const_v,
-                                                              rescale=rescale)
-            if step_new / cp.abs(fobj_v_new) < 1.e-3:
+            curr_fobj_v[:] = fobj_v + self.pattern*step
+
+            self.k_get_w_dv((bsize,), (32,),
+                            (curr_fobj_v, const_v['fref_d'], wshape[0], wshape[1],
+                             rescale, w_dv))
+            vals = (const_v['k_d'] * cp.log(w_dv)).mean(0) - w_dv.mean(0)
+
+            imax = vals.argmax()
+            fobj_v += self.pattern[imax] * step
+            if imax == self.pattern.size // 2: # Center of pattern
+                step /= self.pattern.size**0.5
+
+            if step / cp.abs(fobj_v) < 1.e-3:
                 break
-            fobj_v = fobj_v_new
-            step = step_new
 
         return fobj_v
 
@@ -197,7 +215,7 @@ class MaxLPhaser():
 
         out_dict = {}
         out_dict['d_vals'] = d_vals
-        out_dict['k_d'] = self.mphotons[d_vals, v].transpose()
+        out_dict['k_d'] = self.mphotons_t[v, d_vals]
         out_dict['fref_d'] = self.get_fref_d(d_vals, v)
 
         return out_dict
@@ -210,15 +228,6 @@ class MaxLPhaser():
                                   self.my[v]*self.shifts[d_vals, 1]) / self.size)
         return fref*ramp
 
-    def iterate_pixel_pattern(self, fobj_v, v, step, const, rescale=None):
-        vals = self.get_logq_pixel(cp.array(fobj_v+self.pattern*step), v,
-                                   rescale=rescale, const=const)
-        imax = vals.argmax()
-        retf = fobj_v + self.pattern[imax] * step
-        if imax == self.pattern.size // 2: # Center of pattern
-            return retf, step / (self.pattern.size**0.5 / 5)
-        return retf, step
-
     def get_logq_pixel(self, fobj_v, v, rescale=None, const=None):
         '''Calculate log-likelihood for given model and rescale at the given model pixel'''
         if const is None:
@@ -230,11 +239,11 @@ class MaxLPhaser():
         if not isinstance(fobj_v, cp.ndarray):
             fobj_v = cp.array([fobj_v])
 
-        f_dv = cp.empty((len(const['fref_d']), len(fobj_v)), dtype='c16')
+        w_dv = cp.empty((len(const['fref_d']), len(fobj_v)), dtype='c16')
         bsize = int(cp.ceil(len(const['fref_d'])/32.))
-        self.k_get_f_dv((bsize,), (32,),
-                        (fobj_v, const['fref_d'], len(const['fref_d']), len(fobj_v), f_dv))
-        w_dv = rescale * cp.abs(f_dv)**2
+        self.k_get_w_dv((bsize,), (32,),
+                        (fobj_v, const['fref_d'], len(const['fref_d']),
+                         len(fobj_v), rescale, w_dv))
 
         return (const['k_d'] * cp.log(w_dv)).mean(0) - w_dv.mean(0)
 
