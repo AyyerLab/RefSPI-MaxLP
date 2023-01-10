@@ -43,42 +43,34 @@ void slice_gen(const double *model, const double *cx, const double *cy,
 }
 
 __global__
-void slice_gen_holo(const complex<double> *model, const double *cx, const double *cy,
+void slice_gen_holo(const complex<double> *model,
                     const double shiftx, const double shifty, const double diameter,
-                    const double rel_scale, const double scale,
-                    const long long size, const long long num_pix,
-                    const double *bg, const long long log_flag, double *view) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x ;
-    if (t > num_pix - 1)
+                    const double rel_scale, const double scale, const long long size,
+                    const double *bg, double *view) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x ;
+    int y = blockIdx.y * blockDim.y + threadIdx.y ;
+    if (x > size - 1 || y > size - 1)
         return ;
-    if (log_flag)
-        view[t] = -1000. ;
-    else
-        view[t] = 0. ;
+    int t = x*size + y ;
 
     double cen = floor(size / 2.) ;
     complex<double> ramp, sphere ;
 
-    double phase = 2. * CUDART_PI * (cx[t] * shiftx + cy[t] * shifty) / size ;
-    double ramp_r, ramp_i ;
-    sincos(phase, &ramp_r, &ramp_i) ;
+    double phase = 2. * CUDART_PI * ((x-cen) * shiftx + (y-cen) * shifty) / size ;
+    double ramp_r = cos(phase) ;
+    double ramp_i = sin(phase) ;
     ramp = complex<double>(ramp_r, ramp_i) ;
 
-    double s = sqrt(cx[t]*cx[t] + cy[t]*cy[t]) * CUDART_PI * diameter / size ;
+    double s = sqrt((x-cen)*(x-cen) + (y-cen)*(y-cen)) * CUDART_PI * diameter / size ;
+    if (s == 0.)
+        s = 1.e-5 ;
     sphere = complex<double>(rel_scale*(sin(s) - s*cos(s)) / (s*s*s), 0) ;
 
-    int ix = __double2int_rn(cx[t] + cen), iy = __double2int_rn(cy[t] + cen) ;
-    complex<double> cview = ramp * sphere + model[ix*size + iy] ;
+    complex<double> cview = ramp * sphere + model[t] ;
     view[t] = pow(abs(cview), 2.) ;
 
     view[t] *= scale ;
     view[t] += bg[t] ;
-    if (log_flag) {
-        if (view[t] < 1.e-20)
-            view[t] = -1000. ;
-        else
-            view[t] = log(view[t]) ;
-    }
 }
 
 __global__
@@ -118,38 +110,47 @@ void get_w_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
 }
 
 __global__
-void get_logq_pixel(const complex<double> *fobj, const double rescale, const bool *mask,
+void get_logq_voxel(const complex<double> *fobj, const double rescale, const bool *mask,
                     const double *diams, const double *shifts, const double *qvals,
+                    const long long *ang_ind, const unsigned long long *sampled_mask,
                     const int *indptr, const int *indices, const double *data,
-                    const long long ndata, const long long nvox, double *logq_td) {
-    long long d, t ;
-    t = blockDim.x * blockIdx.x + threadIdx.x ;
-    if (t >= nvox || (!mask[t]))
+                    const long long ndata, const long long nvox, double *logq_vd) {
+    long long d, v ;
+    v = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (v >= nvox || (!mask[v]))
 		return ;
 
-    double qx = qvals[t*3 + 0], qy = qvals[t*3 + 1], qrad = qvals[t*3 + 2] ;
-    double fobj_tx = fobj[t].real(), fobj_ty = fobj[t].imag() ;
+    double qx = qvals[v*3 + 0], qy = qvals[v*3 + 1], qrad = qvals[v*3 + 2] ;
+    double fobj_vx = fobj[v].real(), fobj_vy = fobj[v].imag() ;
+
 	// indptr, indices, data refer to (N_voxel, N_data) sparse array
-    int ind_st = indptr[t], num_ind = indptr[t+1] - ind_st ;
+    int ind_st = indptr[v], num_ind = indptr[v+1] - ind_st ;
     int ind_pos = 0 ;
+    unsigned long long slice_ind, bit_shift ;
 
     double s, sphere_ft, w ;
     double rampx, rampy ;
 
     for (d = 0 ; d < ndata ; ++d) {
+        slice_ind = ang_ind[d] / 64 ;
+        bit_shift = ang_ind[d] % 64 ;
+        if (sampled_mask[slice_ind*nvox + v] & (1<<bit_shift) == 0)
+            continue ;
+
+        // Calculate w_dv = |sphere*e^(i*shift) + fobj|^2
         s = CUDART_PI * qrad * diams[d] ;
         if (s == 0.)
             s = 1.e-8 ;
         sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
         sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampy, &rampx) ;
 
-        w = rescale * (pow(fobj_tx + sphere_ft*rampx, 2.) + pow(fobj_ty + sphere_ft*rampy, 2.)) ;
-        logq_td[t*ndata + d] = -w ;
+        w = rescale * (pow(fobj_vx + sphere_ft*rampx, 2.) + pow(fobj_vy + sphere_ft*rampy, 2.)) ;
+        logq_vd[v*ndata + d] = -w ;
 
         // Assuming sorted indices
         // Assuming photon data is "rotated"
         if (indices[ind_st + ind_pos] == d) {
-            logq_td[t*ndata + d] += data[ind_st + ind_pos] * log(w) ;
+            logq_vd[v*ndata + d] += data[ind_st + ind_pos] * log(w) ;
             ind_pos++ ;
         }
 
