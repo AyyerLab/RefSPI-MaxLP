@@ -47,6 +47,7 @@ class EMC():
         #np.save(self.output_folder+'/sampled.npy', self.phaser.sampled_mask)
 
         self.prob = None
+        self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_pixel = int(np.ceil(self.det.num_pix/32.))
         self.bsize_data = int(np.ceil(BATCH_SIZE/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
@@ -121,7 +122,7 @@ class EMC():
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
         else:
-            self.scales = cp.ones(self.dset.num_data, dtype='f8')
+            self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
 
         with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
             f['model'] = self.model
@@ -141,7 +142,7 @@ class EMC():
             self.prob = cp.empty((self.tot_num_states*self.num_rot, BATCH_SIZE), dtype='f8')
 
         #views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
-        views = cp.empty((self.tot_num_states, self.det.num_pix), dtype='f8')
+        views = cp.empty((self.tot_num_states, self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -153,12 +154,13 @@ class EMC():
             e = min((b+1)*BATCH_SIZE, self.dset.num_data)
             if e - s == 0:
                 break
-            rmax_b = self._calculate_prob(dmodel, views, drange=(s, e))
+            rmax_b, vscale = self._calculate_prob(dmodel, views, drange=(s, e))
             self.rmax = np.append(self.rmax, rmax_b[:e-s])
         sys.stderr.write('\n')
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         np.save(self.output_folder + '/rmax_%.3d.npy' % iternum, self.rmax)
-        self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals, dia_vals, ang_vals).get()
+        self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals,
+                                            dia_vals, ang_vals, rescale=vscale).get()
         self.save_output(self.model, iternum)
 
     def _calculate_prob(self, dmodel, views, drange=None):
@@ -166,22 +168,30 @@ class EMC():
             s, e = (0, self.dset.num_data)
         else:
             s, e = tuple(drange)
-        selmask = (self.probmask < 1)
-        sum_views = cp.zeros_like(views)
+
+        selmask = cp.zeros((self.size,)*2, dtype='bool')
+        selmask[np.rint(self.det.cx+self.size//2).astype('i4'),
+                np.rint(self.det.cy+self.size//2).astype('i4')] = True
+        selmask = selmask.ravel()
+
+        sum_views = cp.zeros((self.num_streams, self.size**2))
         msums = cp.empty(self.tot_num_states)
         rot_views = cp.zeros((self.num_streams, self.det.num_pix))
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
-            self.k_slice_gen_holo((self.bsize_pixel,), (32,),
-                    (dmodel, self.cx, self.cy, self.shiftx[r], self.shifty[r], 
-                     self.sphere_dia[r], 1., 1., self.size, self.det.num_pix, self.dset.bg, 0, views[i]))
+            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                    (dmodel, self.shiftx[r], self.shifty[r],
+                     self.sphere_dia[r], 1., 1., self.size, self.dset.bg, views[i]))
             msums[i] = views[i][selmask].sum()
+            #msums[i] = views[i].sum()
             sum_views[snum] += views[i]
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
-        vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
+        #vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
+        vscale = self.powder.sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
+        #np.save('view.npy', views.reshape(tuple(self.num_states) + (self.size,)*2))
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
@@ -202,7 +212,7 @@ class EMC():
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
         #return self.prob.argmax(axis=0).get().astype('i4')
-        return self.prob.argmax(axis=0).get()
+        return self.prob.argmax(axis=0).get(), vscale
 
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))
@@ -240,7 +250,8 @@ class EMC():
             temp = ndimage.gaussian_filter(temp, i+0.5)
             rmodel += (temp - temp[censlice].min())
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
-        self.model *= 8e-9 * (np.abs(self.model)**2).mean()
+        #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
+        self.model *= 1e-9 * (np.abs(self.model)**2).mean()
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.cx*self.shiftx[n] + self.cy*self.shifty[n])/self.size)
