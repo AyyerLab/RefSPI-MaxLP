@@ -46,7 +46,7 @@ __global__
 void slice_gen_holo(const complex<double> *model,
                     const double shiftx, const double shifty, const double diameter,
                     const double rel_scale, const double scale, const long long size,
-                    const double *bg, double *view) {
+                    double *view) {
     int x = blockIdx.x * blockDim.x + threadIdx.x ;
     int y = blockIdx.y * blockDim.y + threadIdx.y ;
     if (x > size - 1 || y > size - 1)
@@ -70,7 +70,6 @@ void slice_gen_holo(const complex<double> *model,
     view[t] = pow(abs(cview), 2.) ;
 
     view[t] *= scale ;
-    view[t] += bg[t] ;
 }
 
 __global__

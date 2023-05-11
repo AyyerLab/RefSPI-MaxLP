@@ -183,7 +183,7 @@ class EMC():
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx[r], self.shifty[r],
-                     self.sphere_dia[r], 1., 1., self.size, self.dset.bg, views[i]))
+                     self.sphere_dia[r], 1., 1., self.size, views[i]))
             msums[i] = views[i][selmask].sum()
             #msums[i] = views[i].sum()
             sum_views[snum] += views[i]
