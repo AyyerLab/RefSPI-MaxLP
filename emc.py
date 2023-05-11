@@ -159,7 +159,7 @@ class EMC():
         sys.stderr.write('\n')
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         np.save(self.output_folder + '/rmax_%.3d.npy' % iternum, self.rmax)
-        self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals, 
+        self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals,
                                             dia_vals, ang_vals, rescale=vscale).get()
         self.save_output(self.model, iternum)
 
@@ -182,7 +182,7 @@ class EMC():
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx[r], self.shifty[r], 
+                    (dmodel, self.shiftx[r], self.shifty[r],
                      self.sphere_dia[r], 1., 1., self.size, self.dset.bg, views[i]))
             msums[i] = views[i][selmask].sum()
             #msums[i] = views[i].sum()
