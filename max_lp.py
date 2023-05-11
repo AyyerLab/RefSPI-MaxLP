@@ -14,14 +14,14 @@ class MaxLPhaser():
         self._gen_pattern(num_pattern)
         self._preproc_data(num_data)
         self._get_qvals()
-        self.logq_td = cp.zeros((self.size**2, self.num_data)) # TODO: Batch logq_td
-        self.tot_logq_t = cp.empty((len(self.pattern), self.size**2))
+        self.logq_vd = cp.zeros((self.size**2, self.num_data)) # TODO: Batch logq_vd
+        self.tot_logq_v = cp.empty((len(self.pattern), self.size**2))
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
         self.k_get_w_dv = kernels.get_function('get_w_dv')
-        self.k_get_logq_pixel = kernels.get_function('get_logq_pixel')
+        self.k_get_logq_voxel = kernels.get_function('get_logq_voxel')
         self.k_rotate_photons = kernels.get_function('rotate_photons')
         self.k_deduplicate = kernels.get_function('deduplicate')
 
@@ -73,7 +73,7 @@ class MaxLPhaser():
         #TODO: Important!! Generalize these thresholds
         # Model level mask for voxels to run MaxLP on
         #self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1)
-        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1 - 220)
+        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1 - 150)
         # Ring mask for first rescale estimate (model level)
         self.rmask = (self.mrad > 0.10*self.size) & (self.mrad < 0.11*self.size)
         # Ring mask for second rescale estimate, closer to low q (model level)
@@ -97,7 +97,7 @@ class MaxLPhaser():
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
         print('Generated sampled_mask matrix')
 
-    def run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals):
+    def run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals, rescale=1.):
         fconv = cp.array(model).copy().ravel()
         self.shifts = cp.array([sx_vals, sy_vals]).T
         self.diams = cp.array(dia_vals)
@@ -112,40 +112,8 @@ class MaxLPhaser():
         '''
         num_streams = 4
         streams = [cp.cuda.Stream() for _ in range(num_streams)]
-
-        # Calculate with dynamic rescale in thin annulus
-        for v in range(self.size**2):
-            if not self.rmask[v]:
-                continue
-            fconv[v] = self.run_pixel_pattern(fconv[v], v, num_iter=10)
-            sys.stderr.write('\r%d/%d'%(v+1, self.size**2))
-        sys.stderr.write('\n')
-        print('Calculated for pixel annulus')
-
-        # Calculate rescale with above estimate
-        rescales = np.zeros(self.size**2)
-        for v in range(self.size**2):
-            if not self.rmask[v]:
-                continue
-            rescales[v] = self.get_rescale_pixel(fconv[v], v)
-            sys.stderr.write('\r%d/%d'%(v+1, self.size**2))
-        sys.stderr.write('\n')
-        rescale = np.mean(rescales[self.rmask.get()])
-        print('Estimated rescale:', rescale)
-
-        # Reset fconv after rescale calculation
-        fconv = cp.array(model).copy().ravel()
         '''
-        rescale = 1.
-
-        # Calculate with fixed rescale over whole volume
-        for v in range(self.size**2):
-            if not self.mask[v]:
-                continue
-            fconv[v] = self.run_pixel_pattern(fconv[v], v, rescale=rescale, num_iter=10)
-            sys.stderr.write('\r%d/%d'%(v+1, self.size**2))
-        sys.stderr.write('\n')
-        print('Phasing done..')
+        fconv = self.run_all_pattern(fconv, rescale)
 
         #return fconv
         return 0.5 * (fconv + fconv.conj().reshape(self.size, self.size)[::-1,::-1].ravel())
@@ -179,9 +147,9 @@ class MaxLPhaser():
         self.mphotons_t.sum_duplicates()
         print('Rotated photons')
 
-    def run_pixel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
+    def run_voxel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
         '''Optimize model for given model voxel v using pattern search'''
-        const_v = self.get_pixel_constants(v, frac=frac)
+        const_v = self.get_voxel_constants(v, frac=frac)
         step = cp.abs(fobj_v) / 4.
 
         curr_fobj_v = cp.empty(self.pattern.shape, dtype=fobj_v.dtype)
@@ -207,7 +175,7 @@ class MaxLPhaser():
 
         return fobj_v
 
-    def get_pixel_constants(self, v , frac=None):
+    def get_voxel_constants(self, v , frac=None):
         good_angs = cp.zeros((0,), dtype='i4')
         for i in range(len(self.sampled_mask)):
             slice_good_angs = cp.where(self.sampled_mask[i,v] & (1 << cp.arange(64, dtype='u8')) > 0)[0]
@@ -233,13 +201,13 @@ class MaxLPhaser():
                                   self.my[v]*self.shifts[d_vals, 1]) / self.size)
         return fref*ramp
 
-    def get_logq_pixel(self, fobj_v, v, rescale=None, const=None):
-        '''Calculate log-likelihood for given model and rescale at the given model pixel'''
+    def get_logq_voxel(self, fobj_v, v, rescale=None, const=None):
+        '''Calculate log-likelihood for given model and rescale at the given model voxel'''
         if const is None:
-            const = self.get_pixel_constants(v)
+            const = self.get_voxel_constants(v)
 
         if rescale is None:
-            rescale = self.get_rescale_pixel(fobj_v, v, const)
+            rescale = self.get_rescale_voxel(fobj_v, v, const)
 
         if not isinstance(fobj_v, cp.ndarray):
             fobj_v = cp.array([fobj_v])
@@ -252,10 +220,10 @@ class MaxLPhaser():
 
         return (const['k_d'] * cp.log(w_dv)).mean(0) - w_dv.mean(0)
 
-    def get_rescale_pixel(self, fobj_v, v, const=None, frac=None):
-        '''Calculate rescale factor for given model at the given pixel'''
+    def get_rescale_voxel(self, fobj_v, v, const=None, frac=None):
+        '''Calculate rescale factor for given model at the given voxel'''
         if const is None:
-            const = self.get_pixel_constants(v, frac=frac)
+            const = self.get_voxel_constants(v, frac=frac)
 
         #if not isinstance(fobj_v, cp.ndarray):
         if len(fobj_v.shape) == 0: # Check if element of cp.ndarray
@@ -278,18 +246,19 @@ class MaxLPhaser():
         for i in range(num_iter):
             for j in range(num_pattern):
                 curr_fobj = fobj + self.pattern[j]*step
-                self.logq_td[:] = 0
-                self.k_get_logq_pixel((self.size**2,), (1,),
+                self.logq_vd[:] = 0
+                self.k_get_logq_voxel((self.size**2,), (1,),
                                       (curr_fobj, 1.,  curr_mask,
                                        self.diams, self.shifts, self.mqvals,
+                                       self.ang, self.sampled_mask,
                                        self.mphotons_t.indptr, self.mphotons_t.indices,
                                        self.mphotons_t.data,
-                                       self.dset.num_data, self.size**2, self.logq_td))
-                self.tot_logq_t[j] = self.logq_td.sum(1)
+                                       self.dset.num_data, self.size**2, self.logq_vd))
+                self.tot_logq_v[j] = self.logq_vd.sum(1)
                 sys.stderr.write('\r%d/%d: %d/%d    '%(i+1, num_iter, j+1, num_pattern))
-            j_best = self.tot_logq_t[j].argmax(0)
-            step[j_best == num_pattern // 2] /= pattern_size
-            curr_mask[step/fmag < 1e-3] = False
+            j_best = self.tot_logq_v[j].argmax(0)
             fobj += self.pattern[j_best] * step
+            step[j_best == num_pattern // 2] /= pattern_size
+            #curr_mask[step/fmag < 1e-3] = False
         sys.stderr.write('\n')
         return fobj
