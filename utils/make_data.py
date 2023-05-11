@@ -67,11 +67,12 @@ class DataGenerator():
         x, y = cp.indices((self.size,self.size), dtype='f8')
 
         num_circ = 55
+        objsize = 15.
         for i in range(num_circ):
             if self.create_random:
-                rad = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * 7.
+                rad = (0.7 + 0.3*cp.random.rand(1, dtype = 'f8')) * objsize / 4.
                 while True:
-                    cen = cp.random.rand(2, dtype='f8') * 30. - 15 + mcen
+                    cen = cp.random.rand(2, dtype='f8') * objsize - objsize/2 + mcen
                     dist = float(cp.sqrt((cen[0] - mcen)**2 + (cen[1] - mcen)**2) + rad)
 
                     if dist < mcen:
@@ -117,37 +118,31 @@ class DataGenerator():
         mask[pixrad<4] = 0
         mask[pixrad>=cen] = 0
 
-        h5f = h5py.File(op.splitext(self.out_photons_file)[0]+'_meta.h5', 'w')
-        wemc = writeemc.EMCWriter(self.out_photons_file, self.det.num_pix, hdf5=False)
-
-        if self.bgmask_sum > 0:
-            fptr['bg'] = self.bgmask.get()
-
         if self.fluence == 'gamma':
             scale = np.random.gamma(2., 0.5, self.num_data)
         else:
             scale = np.ones(self.num_data, dtype='f8')
-        h5f['scale'] = scale
 
         shifts = np.random.randn(self.num_data, 2)*self.shift_sigma
-        h5f['true_shifts'] = shifts
-
         diameters = np.random.randn(self.num_data)*self.dia_params[1] + self.dia_params[0]
-        h5f['true_diameters'] = diameters
-
+        angles = np.random.rand(self.num_data) * 2. * np.pi
         #rel_scales = diameters**3 * 1000. / 7**3
         #scale *= rel_scales/1.e3
+        model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
 
-        angles = np.random.rand(self.num_data) * 2. * np.pi
-        h5f['true_angles'] = angles
+        with h5py.File(op.splitext(self.out_photons_file)[0]+'_meta.h5', 'w') as h5f:
+            h5f['scale'] = scale
+            h5f['true_shifts'] = shifts
+            h5f['true_diameters'] = diameters
+            h5f['true_angles'] = angles
+            h5f['true_model'] = model.get()
+            if self.bgmask_sum > 0:
+                h5f['bg'] = self.bgmask.get()
+        wemc = writeemc.EMCWriter(self.out_photons_file, self.det.num_pix, hdf5=False)
 
         view = cp.zeros(self.size**2, dtype='f8')
         rview = cp.zeros(self.det.num_pix, dtype='f8')
         zmask = cp.zeros_like(view, dtype='f8')
-
-        model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
-        h5f['true_model'] = model.get()
-        h5f.close()
 
         bsize_pixel = int(np.ceil(self.det.num_pix/32.))
         bsize_model = int(np.ceil(self.size/32.))
@@ -163,7 +158,7 @@ class DataGenerator():
             self.k_slice_gen_holo((bsize_model,)*2, (32,)*2,
                                   (model, shifts[i,0], shifts[i,1],
                                    diameters[i], self.rel_scale, scale[i],
-                                   self.size, zmask, view))
+                                   self.size, view))
             view *= self.mean_count / view.sum()
             self.k_slice_gen((bsize_pixel,), (32,),
                              (view, cx, cy, angles[i], 1., self.size,
