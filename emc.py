@@ -18,7 +18,6 @@ from dset import Dataset
 from max_lp import MaxLPhaser
 
 P_MIN = 1.e-6
-BATCH_SIZE = 10000
 
 class EMC():
     '''Reconstructor object using parameters from config file
@@ -49,8 +48,10 @@ class EMC():
         self.prob = None
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_pixel = int(np.ceil(self.det.num_pix/32.))
-        self.bsize_data = int(np.ceil(BATCH_SIZE/32.))
+        self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
+        self.maxprob = cp.zeros(self.dset.num_data, dtype='f8')
+        self.rmax = cp.zeros(self.dset.num_data, dtype='i8')
 
     def _parse_params(self, config, start_dir):
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
@@ -137,38 +138,21 @@ class EMC():
         the scale factors are in self.scales.
         '''
 
-        if self.prob is None:
-            #self.prob = cp.empty((self.tot_num_states*self.num_rot, self.dset.num_data), dtype='f8')
-            self.prob = cp.empty((self.tot_num_states*self.num_rot, BATCH_SIZE), dtype='f8')
-
         #views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
         views = cp.empty((self.tot_num_states, self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
+        self.maxprob[:] = -cp.finfo('f8').max
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
-        self.rmax = np.array([], dtype='i4')
-        num_batches = int(np.ceil(self.dset.num_data // BATCH_SIZE + 1))
-        for b in np.arange(num_batches):
-            s = b*BATCH_SIZE
-            e = min((b+1)*BATCH_SIZE, self.dset.num_data)
-            if e - s == 0:
-                break
-            rmax_b, vscale = self._calculate_prob(dmodel, views, drange=(s, e))
-            self.rmax = np.append(self.rmax, rmax_b[:e-s])
-        sys.stderr.write('\n')
+        vscale = self._calculate_prob(dmodel, views)
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         np.save(self.output_folder + '/rmax_%.3d.npy' % iternum, self.rmax)
         self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals,
                                             dia_vals, ang_vals, rescale=vscale).get()
         self.save_output(self.model, iternum)
 
-    def _calculate_prob(self, dmodel, views, drange=None):
-        if drange is None:
-            s, e = (0, self.dset.num_data)
-        else:
-            s, e = tuple(drange)
-
+    def _calculate_prob(self, dmodel, views):
         selmask = cp.zeros((self.size,)*2, dtype='bool')
         selmask[np.rint(self.det.cx+self.size//2).astype('i4'),
                 np.rint(self.det.cy+self.size//2).astype('i4')] = True
@@ -192,6 +176,7 @@ class EMC():
         #vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
         vscale = self.powder.sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
         #np.save('view.npy', views.reshape(tuple(self.num_states) + (self.size,)*2))
+        print('Rescale =', vscale)
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
@@ -202,17 +187,18 @@ class EMC():
                         (views[i], self.cx, self.cy, j*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
-                        (rot_views[snum], self.probmask, e - s,
-                         self.dset.ones[s:e], self.dset.multi[s:e],
-                         self.dset.ones_accum[s:e], self.dset.multi_accum[s:e],
+                        (rot_views[snum], self.probmask, self.dset.num_data,
+                         self.dset.ones, self.dset.multi,
+                         self.dset.ones_accum, self.dset.multi_accum,
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(msums[i]*vscale), self.scales[s:e], self.prob[i*self.num_rot+j]))
+                         -float(msums[i]*vscale), self.scales,
+                         i*self.num_rot + j, self.rmax, self.maxprob))
 
-            sys.stderr.write('\rBatch %d: %d/%d    ' % (s//BATCH_SIZE, i+1, self.tot_num_states))
+            sys.stderr.write('\r%d/%d    ' % (i+1, self.tot_num_states))
         [s.synchronize() for s in self.stream_list]
+        sys.stderr.write('\n')
         cp.cuda.Stream().null.use()
-        #return self.prob.argmax(axis=0).get().astype('i4')
-        return self.prob.argmax(axis=0).get(), vscale
+        return vscale
 
     def _unravel_rmax(self, rmax):
         sx, sy, dia, ang = cp.unravel_index(rmax, tuple(self.num_states) + (self.num_rot,))

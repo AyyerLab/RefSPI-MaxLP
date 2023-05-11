@@ -75,23 +75,29 @@ void slice_gen_holo(const complex<double> *model,
 __global__
 void calc_prob_all(const double *lview, const int *mask, const long long ndata, const int *ones,
                    const int *multi, const long long *o_acc, const long long *m_acc, const int *p_o,
-                   const int *p_m, const int *c_m, const double init, const double *scales, double *prob_r) {
+                   const int *p_m, const int *c_m, const double init, const double *scales,
+                   const long long r, long long *rmax, double *maxprob_r) {
     long long d, t ;
     int pixel ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
 
-    prob_r[d] = init * scales[d] ;
+    double myprob = init * scales[d] ;
     for (t = o_acc[d] ; t < o_acc[d] + ones[d] ; ++t) {
         pixel = p_o[t] ;
         if (mask[pixel] < 1)
-            prob_r[d] += lview[pixel] ;
+            myprob += lview[pixel] ;
     }
     for (t = m_acc[d] ; t < m_acc[d] + multi[d] ; ++t) {
         pixel = p_m[t] ;
         if (mask[pixel] < 1)
-            prob_r[d] += lview[pixel] * c_m[t] ;
+            myprob += lview[pixel] * c_m[t] ;
+    }
+
+    if (myprob > maxprob_r[d]) {
+        maxprob_r[d] = myprob ;
+        rmax[d] = r ;
     }
 }
 
