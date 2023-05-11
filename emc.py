@@ -141,7 +141,6 @@ class EMC():
         #views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
         views = cp.empty((self.tot_num_states, self.size**2), dtype='f8')
         dmodel = cp.array(self.model.ravel())
-        self.maxprob[:] = -cp.finfo('f8').max
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
@@ -161,6 +160,7 @@ class EMC():
         sum_views = cp.zeros((self.num_streams, self.size**2))
         msums = cp.empty(self.tot_num_states)
         rot_views = cp.zeros((self.num_streams, self.det.num_pix))
+        self.maxprob[:] = -cp.finfo('f8').max
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
@@ -178,6 +178,7 @@ class EMC():
         #np.save('view.npy', views.reshape(tuple(self.num_states) + (self.size,)*2))
         print('Rescale =', vscale)
 
+        stime = time.time()
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
             self.stream_list[snum].use()
@@ -194,10 +195,11 @@ class EMC():
                          -float(msums[i]*vscale), self.scales,
                          i*self.num_rot + j, self.rmax, self.maxprob))
 
-            sys.stderr.write('\r%d/%d    ' % (i+1, self.tot_num_states))
-        [s.synchronize() for s in self.stream_list]
+            sys.stderr.write('\r%d/%d   ' % (i+1, self.tot_num_states))
+        [stream.synchronize() for stream in self.stream_list]
         sys.stderr.write('\n')
         cp.cuda.Stream().null.use()
+        print(time.time()-stime, 's')
         return vscale
 
     def _unravel_rmax(self, rmax):
