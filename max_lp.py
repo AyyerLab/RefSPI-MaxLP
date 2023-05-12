@@ -3,10 +3,11 @@ import sys
 import numpy as np
 import cupy as cp
 from cupyx.scipy import sparse
+from cupyx.scipy import ndimage as cundimage
 
 class MaxLPhaser():
     '''Reconstruction of object from holographic data using maximum likelihood and pattern search'''
-    def __init__(self, dataset, detector, size=185, num_pattern=8, num_data=None):
+    def __init__(self, dataset, detector, size, num_pattern=8, num_data=None):
         self.size = size
         self.dset = dataset
         self.det = detector
@@ -14,8 +15,7 @@ class MaxLPhaser():
         self._gen_pattern(num_pattern)
         self._preproc_data(num_data)
         self._get_qvals()
-        self.logq_vd = cp.zeros((self.size**2, self.num_data)) # TODO: Batch logq_vd
-        self.tot_logq_v = cp.empty((len(self.pattern), self.size**2))
+        self.logq_v = cp.zeros((len(self.pattern), self.size, self.size))
 
     def _load_kernels(self):
         with open('kernels.cu', 'r') as f:
@@ -26,7 +26,7 @@ class MaxLPhaser():
         self.k_deduplicate = kernels.get_function('deduplicate')
 
     def _gen_pattern(self, nmax):
-        ind = cp.arange(-nmax, nmax+0.5, 0.5)
+        ind = cp.arange(-nmax, nmax+0.5, 1)
         x, y = cp.meshgrid(ind, ind, indexing='ij')
         self.pattern = (x + 1j*y).ravel()
         print('Searching with pattern of size', self.pattern.shape)
@@ -236,29 +236,35 @@ class MaxLPhaser():
 
         return const['k_d'].mean() / (cp.abs(f_dv)**2).mean(0)
 
-    def run_all_pattern(self, fobj, rescale, num_iter=10):
+    def run_all_pattern(self, fobj, rescale, num_iter=10, full_output=False):
         fmag = cp.abs(fobj)
-        step = fmag / 4.
+        #step = fmag / 4.
+        step = cundimage.gaussian_filter(fmag, 10)
         curr_mask = self.mask.copy()
         num_pattern = len(self.pattern)
         pattern_size = num_pattern**0.5
+        if full_output:
+            fconv_list = [fobj.copy()]
 
         for i in range(num_iter):
+            self.logq_v[:] = 0
             for j in range(num_pattern):
                 curr_fobj = fobj + self.pattern[j]*step
-                self.logq_vd[:] = 0
                 self.k_get_logq_voxel((self.size**2,), (1,),
-                                      (curr_fobj, 1.,  curr_mask,
+                                      (curr_fobj, rescale,  curr_mask,
                                        self.diams, self.shifts, self.mqvals,
                                        self.ang, self.sampled_mask,
                                        self.mphotons_t.indptr, self.mphotons_t.indices,
                                        self.mphotons_t.data,
-                                       self.dset.num_data, self.size**2, self.logq_vd))
-                self.tot_logq_v[j] = self.logq_vd.sum(1)
-                sys.stderr.write('\r%d/%d: %d/%d    '%(i+1, num_iter, j+1, num_pattern))
-            j_best = self.tot_logq_v[j].argmax(0)
+                                       self.dset.num_data, self.size**2, self.logq_v[j]))
+            j_best = self.logq_v.argmax(0)
             fobj += self.pattern[j_best] * step
             step[j_best == num_pattern // 2] /= pattern_size
+            if full_output:
+                fconv_list.append(fobj.copy())
             #curr_mask[step/fmag < 1e-3] = False
+            sys.stderr.write('\rMaxLP iteration %d/%d: %d/%d voxels centered'%(i+1, num_iter, (j_best==num_pattern//2).sum(), (self.mask>0).sum()))
         sys.stderr.write('\n')
+        if full_output:
+            return fobj, fconv_list
         return fobj
