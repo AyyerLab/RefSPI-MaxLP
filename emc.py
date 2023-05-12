@@ -151,16 +151,14 @@ class EMC():
                                             dia_vals, ang_vals, rescale=vscale).get()
         self.save_output(self.model, iternum)
 
-    def _calculate_prob(self, dmodel, views):
+    def _calculate_rescale(self, dmodel, views, return_all=False):
         selmask = cp.zeros((self.size,)*2, dtype='bool')
         selmask[np.rint(self.det.cx+self.size//2).astype('i4'),
                 np.rint(self.det.cy+self.size//2).astype('i4')] = True
         selmask = selmask.ravel()
 
-        sum_views = cp.zeros((self.num_streams, self.size**2))
         msums = cp.empty(self.tot_num_states)
-        rot_views = cp.zeros((self.num_streams, self.det.num_pix))
-        self.maxprob[:] = -cp.finfo('f8').max
+        sum_views = cp.zeros((self.num_streams, self.size**2))
 
         for i, r in enumerate(range(self.tot_num_states)):
             snum = i % self.num_streams
@@ -169,14 +167,21 @@ class EMC():
                     (dmodel, self.shiftx[r], self.shifty[r],
                      self.sphere_dia[r], 1., 1., self.size, views[i]))
             msums[i] = views[i][selmask].sum()
-            #msums[i] = views[i].sum()
             sum_views[snum] += views[i]
         [s.synchronize() for s in self.stream_list]
         cp.cuda.Stream().null.use()
-        #vscale = self.powder[selmask].sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
         vscale = self.powder.sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
-        #np.save('view.npy', views.reshape(tuple(self.num_states) + (self.size,)*2))
+
+        if return_all:
+            return vscale, msums
+        return vscale
+
+    def _calculate_prob(self, dmodel, views):
+        vscale, msums = self._calculate_rescale(dmodel, views, return_all=True)
         print('Rescale =', vscale)
+
+        rot_views = cp.zeros((self.num_streams, self.det.num_pix))
+        self.maxprob[:] = -cp.finfo('f8').max
 
         stime = time.time()
         for i, r in enumerate(range(self.tot_num_states)):
@@ -199,7 +204,8 @@ class EMC():
         [stream.synchronize() for stream in self.stream_list]
         sys.stderr.write('\n')
         cp.cuda.Stream().null.use()
-        print(time.time()-stime, 's')
+
+        print('Estimated best params:', time.time()-stime, 's')
         return vscale
 
     def _unravel_rmax(self, rmax):
