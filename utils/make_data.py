@@ -135,7 +135,7 @@ class DataGenerator():
             h5f['true_shifts'] = shifts
             h5f['true_diameters'] = diameters
             h5f['true_angles'] = angles
-            h5f['true_model'] = model.get()
+            h5f['true_model'] = model.get() / self.rel_scale
             if self.bgmask_sum > 0:
                 h5f['bg'] = self.bgmask.get()
         wemc = writeemc.EMCWriter(self.out_photons_file, self.det.num_pix, hdf5=False)
