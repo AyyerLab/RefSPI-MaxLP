@@ -148,7 +148,7 @@ class EMC():
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         np.save(self.output_folder + '/rmax_%.3d.npy' % iternum, self.rmax)
         self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals,
-                                            dia_vals, ang_vals, rescale=vscale).get()
+                                            dia_vals, ang_vals, rescale=float(vscale)).get()
         self.save_output(self.model, iternum)
 
     def _calculate_rescale(self, dmodel, views, return_all=False):
@@ -213,7 +213,7 @@ class EMC():
         sx_vals = cp.unique(self.shiftx)[sx]
         sy_vals = cp.unique(self.shifty)[sy]
         dia_vals = cp.unique(self.sphere_dia)[dia]
-        ang_vals = ang*cp.pi / self.num_rot
+        ang_vals = ang.get() * cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
 
     def save_output(self, model, iternum, intens=None):
