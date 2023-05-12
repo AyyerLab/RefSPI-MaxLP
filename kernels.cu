@@ -4,6 +4,26 @@
 
 extern "C" {
 
+__device__
+double interp2d(const double *model, const long long size,
+                const double cx, const double cy, const double angle) {
+    int cen = size / 2 ;
+    double ac = cos(angle), as = sin(angle) ;
+    double tx = cx * ac - cy * as + cen ;
+    double ty = cx * as + cy * ac + cen ;
+    int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
+    if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+        return 0. ;
+
+    double fx = tx - ix, fy = ty - iy ;
+    double gx = 1. - fx, gy = 1. - fy ;
+
+    return model[ix*size + iy]*gx*gy +
+           model[(ix+1)*size + iy]*fx*gy +
+           model[ix*size + (iy+1)]*gx*fy +
+           model[(ix+1)*size + (iy+1)]*fx*fy ;
+}
+
 __global__
 void slice_gen(const double *model, const double *cx, const double *cy,
                const double angle, const double scale,
@@ -17,21 +37,9 @@ void slice_gen(const double *model, const double *cx, const double *cy,
     else
         view[t] = 0. ;
 
-    int cen = size / 2 ;
-    double ac = cos(angle), as = sin(angle) ;
-    double tx = cx[t] * ac - cy[t] * as + cen ;
-    double ty = cx[t] * as + cy[t] * ac + cen ;
-    int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
-    if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+    view[t] = interp2d(model, size, cx[t], cy[t], angle) ;
+    if (view[t] == 0.)
         return ;
-
-    double fx = tx - ix, fy = ty - iy ;
-    double gx = 1. - fx, gy = 1. - fy ;
-
-    view[t] = model[ix*size + iy]*gx*gy +
-              model[(ix+1)*size + iy]*fx*gy +
-              model[ix*size + (iy+1)]*gx*fy +
-              model[(ix+1)*size + (iy+1)]*fx*fy ;
     view[t] *= scale ;
     view[t] += bg[t] ;
     if (log_flag) {
@@ -40,6 +48,22 @@ void slice_gen(const double *model, const double *cx, const double *cy,
         else
             view[t] = log(view[t]) ;
     }
+}
+
+__device__
+complex<double> rampsphere(const double qx, const double qy,
+                           const double sx, const double sy, const double diameter) {
+    double phase = 2. * CUDART_PI * (qx*sx + qy*sy) ;
+    double ramp_r = cos(phase) ;
+    double ramp_i = sin(phase) ;
+    complex<double> ramp = complex<double>(ramp_r, ramp_i) ;
+
+    double s = sqrt(qx*qx + qy*qy) * CUDART_PI * diameter ;
+    if (s == 0.)
+        s = 1.e-5 ;
+    complex<double> sphere = complex<double>((sin(s) - s*cos(s)) / (s*s*s), 0) ;
+
+    return ramp * sphere ;
 }
 
 __global__
@@ -54,19 +78,9 @@ void slice_gen_holo(const complex<double> *model,
     int t = x*size + y ;
 
     double cen = floor(size / 2.) ;
-    complex<double> ramp, sphere ;
+    complex<double> rsphere = rampsphere((x-cen)/size, (y-cen)/size, shiftx, shifty, diameter) ;
 
-    double phase = 2. * CUDART_PI * ((x-cen) * shiftx + (y-cen) * shifty) / size ;
-    double ramp_r = cos(phase) ;
-    double ramp_i = sin(phase) ;
-    ramp = complex<double>(ramp_r, ramp_i) ;
-
-    double s = sqrt((x-cen)*(x-cen) + (y-cen)*(y-cen)) * CUDART_PI * diameter / size ;
-    if (s == 0.)
-        s = 1.e-5 ;
-    sphere = complex<double>(rel_scale*(sin(s) - s*cos(s)) / (s*s*s), 0) ;
-
-    complex<double> cview = ramp * sphere + model[t] ;
+    complex<double> cview = rel_scale * rsphere + model[t] ;
     view[t] = pow(abs(cview), 2.) ;
 
     view[t] *= scale ;
@@ -123,12 +137,12 @@ void get_logq_voxel(const complex<double> *fobj, const double rescale, const boo
     long long d, v ;
     v = blockDim.x * blockIdx.x + threadIdx.x ;
     if (v >= nvox || (!mask[v]))
-		return ;
+        return ;
 
     double qx = qvals[v*3 + 0], qy = qvals[v*3 + 1], qrad = qvals[v*3 + 2] ;
     double fobj_vr = fobj[v].real(), fobj_vi = fobj[v].imag() ;
 
-	// indptr, indices, data refer to (N_voxel, N_data) sparse array
+    // indptr, indices, data refer to (N_voxel, N_data) sparse array
     int ind_st = indptr[v], num_ind = indptr[v+1] - ind_st ;
     int ind_pos = 0 ;
     unsigned long long slice_ind, bit_shift ;
@@ -209,7 +223,7 @@ void rotate_photons(const int *indptr, const double *angles,
     double tx, ty, rx, ry ;
     int ints = size, cen = size / 2 ;
     double c = cos(angles[d]), s = sin(angles[d]) ;
-    int ix, iy, pos[4], i ;
+    int ix, iy ;
 
     for (t = ind_st ; t < ind_en ; ++t) {
         pix = indices[t] ;
@@ -270,6 +284,72 @@ void deduplicate(const int *indptr, const long long ndata,
                 break ;
             }
         }
+    }
+}
+
+__global__
+void get_prob_frame(const complex<double> *model, const long long size,
+                    const int *p_o, const int *p_m, const int *c_m, const long long n_o, const long long n_m,
+                    const double *sx, const double *sy, const double *dia, const long long nparams,
+                    const double *angles, const long long nangs,
+                    const double *cx, const double *cy, const long long npix,
+                    double *prob) {
+    long long r = blockDim.x * blockIdx.x + threadIdx.x ;
+    long long a = blockDim.y * blockIdx.y + threadIdx.y ;
+    if (r >= nparams || a >= nangs)
+        return ;
+
+    double shiftx = sx[r], shifty = sy[r], diameter = dia[r] ;
+    double ang = angles[a] ;
+
+    long long t, pix ;
+    complex<double> fval ;
+    double intens ;
+    double ac = cos(ang), as = sin(ang) ;
+    int cen = size / 2 ;
+    double tx, ty, fx, fy, gx, gy ;
+    int ix, iy ;
+
+    for (t = 0 ; t < n_o ; ++t) {
+        pix = p_o[t] ;
+        tx = cx[pix] * ac - cy[pix] * as + cen ;
+        ty = cx[pix] * as + cy[pix] * ac + cen ;
+
+        fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) ;
+
+        ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
+        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+            continue ;
+
+        fx = tx - ix, fy = ty - iy ;
+        gx = 1. - fx, gy = 1. - fy ;
+
+        fval += model[ix*size + iy]*gx*gy +
+                model[(ix+1)*size + iy]*fx*gy +
+                model[ix*size + (iy+1)]*gx*fy +
+                model[(ix+1)*size + (iy+1)]*fx*fy ;
+        intens = 2*log(abs(fval)) ;
+        prob[r*nangs + a] += intens ;
+    }
+
+    for (t = 0 ; t < n_m ; ++t) {
+        pix = p_m[t] ;
+        tx = cx[pix] * ac - cy[pix] * as + cen ;
+        ty = cx[pix] * as + cy[pix] * ac + cen ;
+        fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) ;
+        ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
+        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+            continue ;
+
+        fx = tx - ix, fy = ty - iy ;
+        gx = 1. - fx, gy = 1. - fy ;
+
+        fval += model[ix*size + iy]*gx*gy +
+                model[(ix+1)*size + iy]*fx*gy +
+                model[ix*size + (iy+1)]*gx*fy +
+                model[(ix+1)*size + (iy+1)]*fx*fy ;
+        intens = 2*log(abs(fval)) ;
+        prob[r*nangs + a] += intens ;
     }
 }
 
