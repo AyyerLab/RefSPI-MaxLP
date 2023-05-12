@@ -243,9 +243,10 @@ class EMC():
             temp[censlice] = np.random.random(censhape)
             temp = ndimage.gaussian_filter(temp, i+0.5)
             rmodel += (temp - temp[censlice].min())
+        rmodel -= rmodel[:10,:10].mean()
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
         #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
-        self.model *= 1e-9 * (np.abs(self.model)**2).mean()
+        self.model *= 1e-7 * (np.abs(self.model)**2).mean()
 
     def ramp(self, n):
         return cp.exp(1j*2.*cp.pi*(self.cx*self.shiftx[n] + self.cy*self.shifty[n])/self.size)
