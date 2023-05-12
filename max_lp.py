@@ -98,7 +98,7 @@ class MaxLPhaser():
         print('Generated sampled_mask matrix')
 
     def run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals, rescale=1.):
-        fconv = cp.array(model).copy().ravel()
+        fconv = cp.array(model).copy()
         self.shifts = cp.array([sx_vals, sy_vals]).T
         self.diams = cp.array(dia_vals)
         self.ang = cp.array(ang_vals)
@@ -106,7 +106,7 @@ class MaxLPhaser():
 
         # -angs maps from model space to detector space
         # +angs maps from detector space to model space
-        self.rots = self._get_rot(-self.ang).transpose(2, 0, 1)
+        self.rots = self._get_rot(self.ang).transpose(2, 0, 1)
         self._rotate_photons()
 
         '''
@@ -116,7 +116,7 @@ class MaxLPhaser():
         fconv = self.run_all_pattern(fconv, rescale)
 
         #return fconv
-        return 0.5 * (fconv + fconv.conj().reshape(self.size, self.size)[::-1,::-1].ravel())
+        return 0.5 * (fconv + fconv.conj()[::-1,::-1])
 
     def _get_rot(self, ang):
         c = cp.cos(ang)
