@@ -119,14 +119,14 @@ void get_logq_voxel(const complex<double> *fobj, const double rescale, const boo
                     const double *diams, const double *shifts, const double *qvals,
                     const long long *ang_ind, const unsigned long long *sampled_mask,
                     const int *indptr, const int *indices, const double *data,
-                    const long long ndata, const long long nvox, double *logq_vd) {
+                    const long long ndata, const long long nvox, double *logq_v) {
     long long d, v ;
     v = blockDim.x * blockIdx.x + threadIdx.x ;
     if (v >= nvox || (!mask[v]))
 		return ;
 
     double qx = qvals[v*3 + 0], qy = qvals[v*3 + 1], qrad = qvals[v*3 + 2] ;
-    double fobj_vx = fobj[v].real(), fobj_vy = fobj[v].imag() ;
+    double fobj_vr = fobj[v].real(), fobj_vi = fobj[v].imag() ;
 
 	// indptr, indices, data refer to (N_voxel, N_data) sparse array
     int ind_st = indptr[v], num_ind = indptr[v+1] - ind_st ;
@@ -134,7 +134,7 @@ void get_logq_voxel(const complex<double> *fobj, const double rescale, const boo
     unsigned long long slice_ind, bit_shift ;
 
     double s, sphere_ft, w ;
-    double rampx, rampy ;
+    double rampr, rampi ;
 
     for (d = 0 ; d < ndata ; ++d) {
         slice_ind = ang_ind[d] / 64 ;
@@ -147,15 +147,15 @@ void get_logq_voxel(const complex<double> *fobj, const double rescale, const boo
         if (s == 0.)
             s = 1.e-8 ;
         sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
-        sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampy, &rampx) ;
+        sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampi, &rampr) ;
 
-        w = rescale * (pow(fobj_vx + sphere_ft*rampx, 2.) + pow(fobj_vy + sphere_ft*rampy, 2.)) ;
-        logq_vd[v*ndata + d] = -w ;
+        w = rescale * (pow(fobj_vr + sphere_ft*rampr, 2.) + pow(fobj_vi + sphere_ft*rampi, 2.)) ;
+        logq_v[v] -= w ;
 
         // Assuming sorted indices
         // Assuming photon data is "rotated"
         if (indices[ind_st + ind_pos] == d) {
-            logq_vd[v*ndata + d] += data[ind_st + ind_pos] * log(w) ;
+            logq_v[v] += data[ind_st + ind_pos] * log(w) ;
             ind_pos++ ;
         }
 
