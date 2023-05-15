@@ -1,6 +1,7 @@
 #include <cupy/complex.cuh>
 //#include <math_constants.h>
 #define CUDART_PI               3.1415926535897931e+0
+typedef unsigned char uint8_t ;
 
 extern "C" {
 
@@ -87,7 +88,7 @@ void slice_gen_holo(const complex<double> *model,
 }
 
 __global__
-void calc_prob_all(const double *lview, const int *mask, const long long ndata, const int *ones,
+void calc_prob_all(const double *lview, const uint8_t *mask, const long long ndata, const int *ones,
                    const int *multi, const long long *o_acc, const long long *m_acc, const int *p_o,
                    const int *p_m, const int *c_m, const double init, const double *scales,
                    const long long r, long long *rmax, double *maxprob_r) {
@@ -336,7 +337,9 @@ void get_prob_frame(const complex<double> *model, const long long size,
         pix = p_m[t] ;
         tx = cx[pix] * ac - cy[pix] * as + cen ;
         ty = cx[pix] * as + cy[pix] * ac + cen ;
+
         fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) ;
+
         ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
         if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
             continue ;
