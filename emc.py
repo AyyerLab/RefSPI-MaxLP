@@ -86,8 +86,6 @@ class EMC():
         self.size = 2 * int(self.rad.max()) + 3
         print(self.det.num_pix, 'pixels with model size =', self.size)
 
-        self.sphere_ramps = [self.ramp(i)*self.sphere(i) for i in range(int(self.tot_num_states))]
-
     def _generate_masks(self):
         self.invmask = cp.zeros(self.det.num_pix, dtype=cp.bool_)
         self.invmask[self.rad<4] = True
@@ -206,7 +204,7 @@ class EMC():
         sys.stderr.write('\n')
         cp.cuda.Stream().null.use()
 
-        print('Estimated best params:', time.time()-stime, 's')
+        print('Estimated params: %.3f s' % (time.time()-stime))
         return vscale
 
     def _unravel_rmax(self, rmax):
@@ -248,16 +246,3 @@ class EMC():
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
         #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
         self.model *= 1e-7 * (np.abs(self.model)**2).mean()
-
-    def ramp(self, n):
-        return cp.exp(1j*2.*cp.pi*(self.cx*self.shiftx[n] + self.cy*self.shifty[n])/self.size)
-
-    def sphere(self, n, diameter=None):
-        if n is None:
-            dia = diameter
-        else:
-            dia = self.sphere_dia[n]
-        s = cp.pi * self.rad * dia / self.size
-        s[s==0] = 1.e-5
-        return ((cp.sin(s) - s*cp.cos(s)) / s**3).ravel()
-
