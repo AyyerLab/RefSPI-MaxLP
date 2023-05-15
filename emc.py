@@ -42,7 +42,7 @@ class EMC():
         self._init_model()
 
         self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
-        self.phaser.get_sampled_mask(cp.arange(self.num_rot)*np.pi/self.num_rot)
+        self.phaser.get_sampled_mask(cp.arange(self.num_rot)*2*np.pi/self.num_rot)
         #np.save(self.output_folder+'/sampled.npy', self.phaser.sampled_mask)
 
         self.prob = None
@@ -105,6 +105,7 @@ class EMC():
         self.k_slice_gen = kernels.get_function('slice_gen')
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
+        self.k_get_prob_frame = kernels.get_function('get_prob_frame')
 
     def _parse_data(self):
         stime = time.time()
@@ -190,7 +191,7 @@ class EMC():
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (views[i], self.cx, self.cy, j*np.pi/self.num_rot, 1.,
+                        (views[i], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
                         (rot_views[snum], self.probmask, self.dset.num_data,
