@@ -3,12 +3,150 @@
 import sys
 import os.path as op
 import argparse
+import configparser
 import time
-import socket
 
+import numpy as np
 import cupy as cp
+import h5py
+from scipy import ndimage
 
-from emc import EMC
+from det import Detector
+from dset import Dataset
+from estimate import Estimator
+from max_lp import Phaser
+
+class Recon():
+    '''Reconstructor object using parameters from config file
+
+    Args:
+        config_file (str): Path to configuration file
+
+    The appropriate CUDA device must be selected before initializing the class.
+    '''
+    def __init__(self, config_file, num_streams=4):
+        self.num_streams = num_streams
+        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
+
+        self._compile_kernels()
+
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        self._parse_params(config, op.dirname(config_file))
+        self._generate_states(config)
+        self._parse_detector(config)
+        self._parse_data(config)
+        self._init_model()
+
+        self.estimator = Estimator(self.dset, self.det, self.size, num_streams=num_streams)
+        self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
+        self.phaser.get_sampled_mask(cp.arange(self.num_rot)*2*np.pi/self.num_rot)
+
+    def _parse_params(self, config, start_dir):
+        self.num_modes = config.getint('emc', 'num_modes', fallback=1)
+        self.num_rot = config.getint('emc', 'num_rot')
+        self.num_pattern = config.getint('emc', 'num_pattern', fallback=4)
+        self.output_folder = op.join(start_dir, config.get('emc', 'output_folder'))
+        self.log_file = op.join(start_dir, config.get('emc', 'log_file'))
+
+        self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
+
+    def _generate_states(self, config):
+        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
+        sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
+        sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
+        self.states = {}
+        self.states['shiftx'], self.states['shifty'], self.states['sphere_dia'] = np.meshgrid(
+                np.linspace(sx[0], sx[1], int(sx[2])),
+                np.linspace(sy[0], sy[1], int(sy[2])),
+                np.linspace(dia[0], dia[1], int(dia[2])),
+                indexing='ij')
+
+        self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
+        print(int(self.num_states.prod()), 'sampled states')
+
+    def _parse_detector(self, config):
+        detector_file = op.join(start_dir, config.get('emc', 'in_detector_file'))
+        self.det = Detector(detector_file)
+        rad = np.sqrt(self.det.cx**2 + self.det.cy**2)
+        self.size = 2 * int(rad.max()) + 3
+        print(self.det.num_pix, 'pixels with model size =', self.size)
+
+    def _compile_kernels(self):
+        with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
+            kernels = cp.RawModule(code=f.read())
+        self.k_slice_gen = kernels.get_function('slice_gen')
+        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
+        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
+        self.k_get_prob_frame = kernels.get_function('get_prob_frame')
+
+    def _parse_data(self):
+        stime = time.time()
+        photons_file = op.join(start_dir, config.get('emc', 'in_photons_file'))
+        self.dset = Dataset(photons_file, self.det.num_pix, self.need_scaling)
+        self.powder = self.dset.get_powder()
+        etime = time.time()
+
+        print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
+                (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
+        sys.stdout.flush()
+
+    def _init_model(self):
+        self.model = np.empty((self.size**2,), dtype='c16')
+        self._random_model()
+
+        if self.need_scaling:
+            self.scales = self.dset.counts / self.dset.mean_count
+        else:
+            self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
+
+        with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
+            f['model'] = self.model
+            f['scale'] = self.scales.get()
+
+    def run_iteration(self, iternum=None):
+        '''Run one iteration of reconstruction algorithm
+
+        Args:
+            iternum (int, optional): If specified, output is tagged with iteration number
+        Current guess is assumed to be in self.model, which is updated. If scaling is included,
+        the scale factors are in self.scales.
+        '''
+
+        params_dict = self.estimator.estimate_global(dmodel, self.states, self.num_rot)
+        self.model = self.phaser.run_phaser(self.model, params_dict).get()
+        self.save_output(self.model, params_dict, iternum)
+
+    def save_output(self, model, params, iternum, intens=None):
+        if iternum is None:
+            np.save(op.join(self.output_folder, 'model.npy'), self.model)
+            return
+
+        with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
+            fptr['model'] = self.model.reshape((self.size,)*2)
+            if intens is not None:
+                fptr['intens'] = intens.get()
+
+            fptr['angles'] = params['angles'].get()
+            fptr['diameters'] = params['sphere_dia'].get()
+            fptr['shifts'] = np.array([params['shift_x'].get(), params['shift_y'].get()]).T
+
+    def _random_model(self):
+        rmodel = np.zeros((self.size,)*2)
+        #self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
+        #self.model *= 1e-3 # To match scale of sphere model
+        temp = np.zeros_like(rmodel)
+        cen = self.size // 2
+        censlice = slice(cen-cen//10, cen+cen//10+1), slice(cen-cen//10, cen+cen//10+1)
+        censhape = rmodel[censlice].shape
+        for i in range(5):
+            temp[censlice] = np.random.random(censhape)
+            temp = ndimage.gaussian_filter(temp, i+0.5)
+            rmodel += (temp - temp[censlice].min())
+        rmodel -= rmodel[:10,:10].mean()
+        self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
+        #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
+        self.model *= 1e-7 * (np.abs(self.model)**2).mean()
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
@@ -26,7 +164,7 @@ def main():
     print('Running on device', args.device)
     cp.cuda.Device(args.device).use()
 
-    recon = EMC(args.config_file, num_streams=args.streams)
+    recon = Recon(args.config_file, num_streams=args.streams)
     logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
     logf.write('Iter  time(s)  change\n')
     logf.flush()
