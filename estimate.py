@@ -125,5 +125,5 @@ class Estimator():
         sx_vals = cp.unique(self.shiftx)[sx]
         sy_vals = cp.unique(self.shifty)[sy]
         dia_vals = cp.unique(self.sphere_dia)[dia]
-        ang_vals = ang * cp.pi / self.num_rot
+        ang_vals = ang * 2 * cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
