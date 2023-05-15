@@ -98,26 +98,18 @@ class MaxLPhaser():
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
         print('Generated sampled_mask matrix')
 
-    def run_phaser(self, model, params):
+    def run_phaser(self, model, params, num_iter=10):
         fconv = cp.array(model).copy()
         self.shifts = cp.array([params['shift_x'], params['shift_y']]).T
         self.diams = cp.array(params['sphere_dia'])
         self.ang = cp.array(params['angles'])
         rescale = float(params['frame_rescale'])
 
-        print('Starting Phaser...')
         stime = time.time()
-
-        # -angs maps from model space to detector space
-        # +angs maps from detector space to model space
         self.rots = self._get_rot(self.ang).transpose(2, 0, 1)
         self._rotate_photons()
 
-        '''
-        num_streams = 4
-        streams = [cp.cuda.Stream() for _ in range(num_streams)]
-        '''
-        fconv = self.run_all_pattern(fconv, rescale)
+        fconv = self.run_all_pattern(fconv, rescale, num_iter=num_iter)
 
         print('Updated model: %3f s' % (time.time() - stime))
         return 0.5 * (fconv + fconv.conj()[::-1,::-1])

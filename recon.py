@@ -92,7 +92,7 @@ class Recon():
             f['model'] = self.model
             f['scale'] = self.scales.get()
 
-    def run_iteration(self, iternum=None):
+    def run_iteration(self, iternum=None, num_phaser_iter=10):
         '''Run one iteration of reconstruction algorithm
 
         Args:
@@ -100,9 +100,8 @@ class Recon():
         Current guess is assumed to be in self.model, which is updated. If scaling is included,
         the scale factors are in self.scales.
         '''
-
         params_dict = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
-        self.model = self.phaser.run_phaser(self.model, params_dict).get()
+        self.model = self.phaser.run_phaser(self.model, params_dict, num_iter=num_phaser_iter).get()
         self.save_output(self.model, params_dict, iternum)
 
     def save_output(self, model, params, iternum, intens=None):
