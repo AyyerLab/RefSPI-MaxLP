@@ -14,7 +14,7 @@ from scipy import ndimage
 from det import Detector
 from dset import Dataset
 from estimate import Estimator
-from max_lp import Phaser
+from max_lp import MaxLPhaser
 
 class Recon():
     '''Reconstructor object using parameters from config file
@@ -26,16 +26,13 @@ class Recon():
     '''
     def __init__(self, config_file, num_streams=4):
         self.num_streams = num_streams
-        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
-
-        self._compile_kernels()
 
         config = configparser.ConfigParser()
         config.read(config_file)
         self._parse_params(config, op.dirname(config_file))
+        self._parse_detector(config, op.dirname(config_file))
+        self._parse_data(config, op.dirname(config_file))
         self._generate_states(config)
-        self._parse_detector(config)
-        self._parse_data(config)
         self._init_model()
 
         self.estimator = Estimator(self.dset, self.det, self.size, num_streams=num_streams)
@@ -51,45 +48,36 @@ class Recon():
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
-    def _generate_states(self, config):
-        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
-        sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
-        sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
-        self.states = {}
-        self.states['shiftx'], self.states['shifty'], self.states['sphere_dia'] = np.meshgrid(
-                np.linspace(sx[0], sx[1], int(sx[2])),
-                np.linspace(sy[0], sy[1], int(sy[2])),
-                np.linspace(dia[0], dia[1], int(dia[2])),
-                indexing='ij')
-
-        self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
-        print(int(self.num_states.prod()), 'sampled states')
-
-    def _parse_detector(self, config):
+    def _parse_detector(self, config, start_dir):
         detector_file = op.join(start_dir, config.get('emc', 'in_detector_file'))
         self.det = Detector(detector_file)
         rad = np.sqrt(self.det.cx**2 + self.det.cy**2)
         self.size = 2 * int(rad.max()) + 3
         print(self.det.num_pix, 'pixels with model size =', self.size)
 
-    def _compile_kernels(self):
-        with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
-            kernels = cp.RawModule(code=f.read())
-        self.k_slice_gen = kernels.get_function('slice_gen')
-        self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
-        self.k_calc_prob_all = kernels.get_function('calc_prob_all')
-        self.k_get_prob_frame = kernels.get_function('get_prob_frame')
-
-    def _parse_data(self):
+    def _parse_data(self, config, start_dir):
         stime = time.time()
         photons_file = op.join(start_dir, config.get('emc', 'in_photons_file'))
         self.dset = Dataset(photons_file, self.det.num_pix, self.need_scaling)
-        self.powder = self.dset.get_powder()
         etime = time.time()
 
         print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
                 (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
         sys.stdout.flush()
+
+    def _generate_states(self, config):
+        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
+        sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
+        sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
+        self.states = {}
+        self.states['shift_x'], self.states['shift_y'], self.states['sphere_dia'] = np.meshgrid(
+                np.linspace(sx[0], sx[1], int(sx[2])),
+                np.linspace(sy[0], sy[1], int(sy[2])),
+                np.linspace(dia[0], dia[1], int(dia[2])),
+                indexing='ij')
+
+        self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
+        print(int(self.states['num_states'].prod()), 'sampled states')
 
     def _init_model(self):
         self.model = np.empty((self.size**2,), dtype='c16')
@@ -113,7 +101,7 @@ class Recon():
         the scale factors are in self.scales.
         '''
 
-        params_dict = self.estimator.estimate_global(dmodel, self.states, self.num_rot)
+        params_dict = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
         self.model = self.phaser.run_phaser(self.model, params_dict).get()
         self.save_output(self.model, params_dict, iternum)
 
