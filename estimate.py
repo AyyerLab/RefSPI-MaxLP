@@ -17,10 +17,13 @@ class Estimator():
         self.det = detector
         self.size = size
         self.num_streams = num_streams
+        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
         self._compile_kernels()
         self.cx = cp.array(self.det.cx)
         self.cy = cp.array(self.det.cy)
+        self.powder = self.dset.get_powder()
+        self.probmask = cp.array(self.det.raw_mask)
 
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_pixel = int(np.ceil(self.det.num_pix/32.))
@@ -37,7 +40,7 @@ class Estimator():
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
         self.k_get_prob_frame = kernels.get_function('get_prob_frame')
 
-    def estimate_global(self, dmodel, states_dict, num_rot):
+    def estimate_global(self, model, scales, states_dict, num_rot):
         '''Estimate latent parameters with a global search
 
         For this search, the same parameters are examined for all frames
@@ -54,7 +57,7 @@ class Estimator():
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
-        vscale = self._calculate_prob(dmodel, views)
+        vscale = self._calculate_prob(cp.array(model), scales, views)
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         return {'shift_x': sx_vals, 'shift_y': sy_vals,
                 'sphere_dia': dia_vals, 'angles': ang_vals,
@@ -73,8 +76,8 @@ class Estimator():
             snum = i % self.num_streams
             self.stream_list[snum].use()
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx[r], self.shifty[r],
-                     self.sphere_dia[r], 1., 1., self.size, views[i]))
+                    (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
+                     self.sphere_dia.ravel()[r], 1., 1., self.size, views[i]))
             msums[i] = views[i][selmask].sum()
             sum_views[snum] += views[i]
         [s.synchronize() for s in self.stream_list]
@@ -85,7 +88,7 @@ class Estimator():
             return vscale, msums
         return vscale
 
-    def _calculate_prob(self, dmodel, views):
+    def _calculate_prob(self, dmodel, scales, views):
         vscale, msums = self._calculate_rescale(dmodel, views, return_all=True)
         print('Rescale =', vscale)
 
@@ -102,11 +105,11 @@ class Estimator():
                         (views[i], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
-                        (rot_views[snum], self.det.raw_mask, self.dset.num_data,
+                        (rot_views[snum], self.probmask, self.dset.num_data,
                          self.dset.ones, self.dset.multi,
                          self.dset.ones_accum, self.dset.multi_accum,
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(msums[i]*vscale), self.scales,
+                         -float(msums[i]*vscale), scales,
                          i*self.num_rot + j, self.rmax, self.maxprob))
 
             sys.stderr.write('\r%d/%d   ' % (i+1, self.tot_num_states))
