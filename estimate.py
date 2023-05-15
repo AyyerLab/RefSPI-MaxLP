@@ -4,98 +4,30 @@
 
 import sys
 import os.path as op
-import argparse
-import configparser
 import time
 
 import numpy as np
 import cupy as cp
-import h5py
-from scipy import ndimage, special
 
-from det import Detector
-from dset import Dataset
-from max_lp import MaxLPhaser
-
-P_MIN = 1.e-6
-
-class EMC():
-    '''Reconstructor object using parameters from config file
-
-    Args:
-        config_file (str): Path to configuration file
-
-    The appropriate CUDA device must be selected before initializing the class.
+class Estimator():
+    '''Estimate latent parameters given model and data
     '''
-    def __init__(self, config_file, num_streams=4):
+    def __init__(self, dataset, detector, size, num_streams=4):
+        self.dset = dataset
+        self.det = detector
+        self.size = size
         self.num_streams = num_streams
-        self.mem_size = cp.cuda.Device(cp.cuda.runtime.getDevice()).mem_info[1]
 
         self._compile_kernels()
+        self.cx = cp.array(self.det.cx)
+        self.cy = cp.array(self.det.cy)
 
-        config = configparser.ConfigParser()
-        config.read(config_file)
-        self._parse_params(config, op.dirname(config_file))
-        self._generate_states(config)
-        self._generate_masks()
-        self._parse_data()
-        self._init_model()
-
-        self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
-        self.phaser.get_sampled_mask(cp.arange(self.num_rot)*2*np.pi/self.num_rot)
-        #np.save(self.output_folder+'/sampled.npy', self.phaser.sampled_mask)
-
-        self.prob = None
         self.bsize_model = int(np.ceil(self.size/32.))
         self.bsize_pixel = int(np.ceil(self.det.num_pix/32.))
         self.bsize_data = int(np.ceil(self.dset.num_data/32.))
         self.stream_list = [cp.cuda.Stream() for _ in range(self.num_streams)]
         self.maxprob = cp.zeros(self.dset.num_data, dtype='f8')
         self.rmax = cp.zeros(self.dset.num_data, dtype='i8')
-
-    def _parse_params(self, config, start_dir):
-        self.num_modes = config.getint('emc', 'num_modes', fallback=1)
-        self.num_rot = config.getint('emc', 'num_rot')
-        self.num_pattern = config.getint('emc', 'num_pattern', fallback=4)
-        self.photons_file = op.join(start_dir, config.get('emc', 'in_photons_file'))
-        self.detector_file = op.join(start_dir, config.get('emc', 'in_detector_file'))
-        self.output_folder = op.join(start_dir, config.get('emc', 'output_folder'))
-        self.log_file = op.join(start_dir, config.get('emc', 'log_file'))
-
-        self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
-
-    def _generate_states(self, config):
-        dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
-        sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
-        sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
-        self.shiftx, self.shifty, self.sphere_dia = np.meshgrid(np.linspace(sx[0], sx[1], int(sx[2])),
-                                                                np.linspace(sy[0], sy[1], int(sy[2])),
-                                                                np.linspace(dia[0], dia[1], int(dia[2])), indexing='ij')
-
-        self.shiftx = self.shiftx.ravel()
-        self.shifty = self.shifty.ravel()
-        self.sphere_dia = self.sphere_dia.ravel()
-        self.num_states = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
-        self.tot_num_states = int(self.num_states.prod())
-        print(self.tot_num_states, 'sampled states')
-
-        self.det = Detector(self.detector_file)
-        self.cx = cp.array(self.det.cx)
-        self.cy = cp.array(self.det.cy)
-        self.rad = cp.sqrt(self.cx**2 + self.cy**2)
-        self.size = 2 * int(self.rad.max()) + 3
-        print(self.det.num_pix, 'pixels with model size =', self.size)
-
-    def _generate_masks(self):
-        self.invmask = cp.zeros(self.det.num_pix, dtype=cp.bool_)
-        self.invmask[self.rad<4] = True
-        self.invmask[self.rad>=self.size//2] = True
-        self.intinvmask = self.invmask.astype('i4')
-
-        self.probmask = cp.zeros(self.det.num_pix, dtype='i4')
-        self.probmask[self.rad>=self.size//2] = 2
-        self.probmask[self.rad<self.size//8] = 1
-        self.probmask[self.rad<4] = 2
 
     def _compile_kernels(self):
         with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
@@ -105,50 +37,28 @@ class EMC():
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
         self.k_get_prob_frame = kernels.get_function('get_prob_frame')
 
-    def _parse_data(self):
-        stime = time.time()
-        self.dset = Dataset(self.photons_file, self.det.num_pix, self.need_scaling)
-        self.powder = self.dset.get_powder()
-        etime = time.time()
+    def estimate_global(self, dmodel, states_dict, num_rot):
+        '''Estimate latent parameters with a global search
 
-        print('%d frames with %.3f photons/frame (%.3f s) (%.2f MB)' % \
-                (self.dset.num_data, self.dset.mean_count, etime-stime, self.dset.mem/1024**2))
-        sys.stdout.flush()
-
-    def _init_model(self):
-        self.model = np.empty((self.size**2,), dtype='c16')
-        self._random_model()
-
-        if self.need_scaling:
-            self.scales = self.dset.counts / self.dset.mean_count
-        else:
-            self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
-
-        with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
-            f['model'] = self.model
-            f['scale'] = self.scales.get()
-
-    def run_iteration(self, iternum=None):
-        '''Run one iterations of EMC algorithm
-
-        Args:
-            iternum (int, optional): If specified, output is tagged with iteration number
-        Current guess is assumed to be in self.model, which is updated. If scaling is included,
-        the scale factors are in self.scales.
+        For this search, the same parameters are examined for all frames
         '''
 
-        #views = cp.empty((self.num_streams, self.det.num_pix), dtype='f8')
+        self.shiftx = states_dict['shift_x']
+        self.shifty = states_dict['shift_y']
+        self.sphere_dia = states_dict['sphere_dia']
+        self.num_states = states_dict['num_states']
+        self.tot_num_states = self.shiftx.size
+        self.num_rot = num_rot
+
         views = cp.empty((self.tot_num_states, self.size**2), dtype='f8')
-        dmodel = cp.array(self.model.ravel())
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
         vscale = self._calculate_prob(dmodel, views)
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
-        np.save(self.output_folder + '/rmax_%.3d.npy' % iternum, self.rmax)
-        self.model = self.phaser.run_phaser(self.model, sx_vals, sy_vals,
-                                            dia_vals, ang_vals, rescale=float(vscale)).get()
-        self.save_output(self.model, iternum)
+        return {'shift_x': sx_vals, 'shift_y': sy_vals,
+                'sphere_dia': dia_vals, 'angles': ang_vals,
+                'frame_rescale': vscale}
 
     def _calculate_rescale(self, dmodel, views, return_all=False):
         selmask = cp.zeros((self.size,)*2, dtype='bool')
@@ -192,7 +102,7 @@ class EMC():
                         (views[i], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
-                        (rot_views[snum], self.probmask, self.dset.num_data,
+                        (rot_views[snum], self.det.raw_mask, self.dset.num_data,
                          self.dset.ones, self.dset.multi,
                          self.dset.ones_accum, self.dset.multi_accum,
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
@@ -212,37 +122,5 @@ class EMC():
         sx_vals = cp.unique(self.shiftx)[sx]
         sy_vals = cp.unique(self.shifty)[sy]
         dia_vals = cp.unique(self.sphere_dia)[dia]
-        ang_vals = ang.get() * cp.pi / self.num_rot
+        ang_vals = ang * cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
-
-    def save_output(self, model, iternum, intens=None):
-        if iternum is None:
-            np.save(op.join(self.output_folder, 'model.npy'), self.model)
-            return
-
-        with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
-            fptr['model'] = self.model.reshape((self.size,)*2)
-            if intens is not None:
-                fptr['intens'] = intens.get()
-
-            sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
-            fptr['angles'] = ang_vals
-            fptr['diameters'] = dia_vals.get()
-            fptr['shifts'] = np.array([sx_vals.get(), sy_vals.get()]).T
-
-    def _random_model(self):
-        rmodel = np.zeros((self.size,)*2)
-        #self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
-        #self.model *= 1e-3 # To match scale of sphere model
-        temp = np.zeros_like(rmodel)
-        cen = self.size // 2
-        censlice = slice(cen-cen//10, cen+cen//10+1), slice(cen-cen//10, cen+cen//10+1)
-        censhape = rmodel[censlice].shape
-        for i in range(5):
-            temp[censlice] = np.random.random(censhape)
-            temp = ndimage.gaussian_filter(temp, i+0.5)
-            rmodel += (temp - temp[censlice].min())
-        rmodel -= rmodel[:10,:10].mean()
-        self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
-        #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
-        self.model *= 1e-7 * (np.abs(self.model)**2).mean()
