@@ -1,4 +1,5 @@
 import sys
+import time
 
 import numpy as np
 import cupy as cp
@@ -72,8 +73,8 @@ class MaxLPhaser():
 
         #TODO: Important!! Generalize these thresholds
         # Model level mask for voxels to run MaxLP on
-        #self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1)
-        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1 - 150)
+        self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1)
+        #self.mask = (self.mrad > self.drad.min()) & (self.mrad < self.size // 2 - 1 - 150)
         # Ring mask for first rescale estimate (model level)
         self.rmask = (self.mrad > 0.10*self.size) & (self.mrad < 0.11*self.size)
         # Ring mask for second rescale estimate, closer to low q (model level)
@@ -97,12 +98,15 @@ class MaxLPhaser():
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
         print('Generated sampled_mask matrix')
 
-    def run_phaser(self, model, sx_vals, sy_vals, dia_vals, ang_vals, rescale=1.):
+    def run_phaser(self, model, params):
         fconv = cp.array(model).copy()
-        self.shifts = cp.array([sx_vals, sy_vals]).T
-        self.diams = cp.array(dia_vals)
-        self.ang = cp.array(ang_vals)
+        self.shifts = cp.array([params['shift_x'], params['shift_y']]).T
+        self.diams = cp.array(params['sphere_dia'])
+        self.ang = cp.array(params['angles'])
+        rescale = float(params['frame_rescale'])
+
         print('Starting Phaser...')
+        stime = time.time()
 
         # -angs maps from model space to detector space
         # +angs maps from detector space to model space
@@ -115,7 +119,7 @@ class MaxLPhaser():
         '''
         fconv = self.run_all_pattern(fconv, rescale)
 
-        #return fconv
+        print('Updated model: %3f s' % (time.time() - stime))
         return 0.5 * (fconv + fconv.conj()[::-1,::-1])
 
     def _get_rot(self, ang):
@@ -147,7 +151,7 @@ class MaxLPhaser():
         self.mphotons_t.sum_duplicates()
         print('Rotated photons')
 
-    def run_voxel_pattern(self, fobj_v, v, num_iter=10, rescale=None, frac=None):
+    def run_voxel_pattern(self, fobj_v, v, rescale, num_iter=10, frac=None):
         '''Optimize model for given model voxel v using pattern search'''
         const_v = self.get_voxel_constants(v, frac=frac)
         step = cp.abs(fobj_v) / 4.
@@ -229,12 +233,12 @@ class MaxLPhaser():
         if len(fobj_v.shape) == 0: # Check if element of cp.ndarray
             fobj_v = cp.array([fobj_v])
 
-        f_dv = cp.zeros((len(const['fref_d']), len(fobj_v)), dtype='c16')
+        w_dv = cp.zeros((len(const['fref_d']), len(fobj_v)), dtype='f8')
         bsize = int(cp.ceil(len(const['fref_d'])/32.))
-        self.k_get_f_dv((bsize,), (32,),
-                        (fobj_v, const['fref_d'], len(const['fref_d']), len(fobj_v), f_dv))
+        self.k_get_w_dv((bsize,), (32,),
+                        (fobj_v, const['fref_d'], len(const['fref_d']), len(fobj_v), 1., w_dv))
 
-        return const['k_d'].mean() / (cp.abs(f_dv)**2).mean(0)
+        return const['k_d'].mean() / w_dv.mean(0)
 
     def run_all_pattern(self, fobj, rescale, num_iter=10, full_output=False):
         fmag = cp.abs(fobj)
@@ -246,6 +250,7 @@ class MaxLPhaser():
         if full_output:
             fconv_list = [fobj.copy()]
 
+        stime = time.time()
         for i in range(num_iter):
             self.logq_v[:] = 0
             for j in range(num_pattern):
@@ -263,7 +268,9 @@ class MaxLPhaser():
             if full_output:
                 fconv_list.append(fobj.copy())
             #curr_mask[step/fmag < 1e-3] = False
-            sys.stderr.write('\rMaxLP iteration %d/%d: %d/%d voxels centered'%(i+1, num_iter, (j_best==num_pattern//2).sum(), (self.mask>0).sum()))
+            sys.stderr.write('\rMaxLP iteration %d/%d: ' % (i+1, num_iter))
+            sys.stderr.write('%d/%d voxels centered '%((j_best==num_pattern//2).sum(), (self.mask>0).sum()))
+            sys.stderr.write('(%.2f s/iteration) '%((time.time()-stime) / (i+1)))
         sys.stderr.write('\n')
         if full_output:
             return fobj, fconv_list
