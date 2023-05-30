@@ -27,10 +27,12 @@ class Dataset():
             _ = np.fromfile(fptr, '=i4', count=254)
 
             self.ones = cp.fromfile(fptr, '=i4', count=self.num_data)
-            self.ones_accum = cp.put(self.ones.cumsum(), 0, 0)
+            self.ones_accum = cp.roll(self.ones.cumsum(), 1)
+            self.ones_accum[0] = 0
 
             self.multi = cp.fromfile(fptr, '=i4', count=self.num_data)
-            self.multi_accum = cp.put(self.multi.cumsum(), 0, 0)
+            self.multi_accum = cp.roll(self.multi.cumsum(), 1)
+            self.multi_accum[0] = 0
 
             self.place_ones = cp.fromfile(fptr, '=i4', count=int(self.ones.sum()))
             self.place_multi = cp.fromfile(fptr, '=i4', count=int(self.multi.sum()))
@@ -51,14 +53,12 @@ class Dataset():
 
     def get_frame(self, num):
         """Get particular frame from photons_file"""
-        s_o = self.ones_accum[num]
-        e_o = self.ones_accum[num+1]
-        s_m = self.multi_accum[num]
-        e_m = self.multi_accum[num+1]
+        o_a = self.ones_accum[num]
+        m_a = self.multi_accum[num]
 
         frame = cp.zeros(self.num_pix, dtype='i4')
-        frame[self.place_ones[s_o:e_o]] += 1
-        frame[self.place_multi[s_m:e_m]] += self.count_multi[s_m:e_m]
+        frame[self.place_ones[o_a:o_a+self.ones[num]]] += 1
+        frame[self.place_multi[m_a:m_a+self.multi[num]]] += self.count_multi[m_a:m_a+self.multi[num]]
 
         return frame
 
