@@ -52,46 +52,44 @@ class Estimator():
         self.num_states = states_dict['num_states']
         self.tot_num_states = self.shiftx.size
         self.num_rot = num_rot
+        self.msums = cp.empty((self.tot_num_states, self.num_rot))
 
-        views = cp.empty((self.tot_num_states, self.size**2), dtype='f8')
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
 
-        vscale = self._calculate_prob(cp.array(model), scales, views)
+        vscale = self._calculate_prob(cp.array(model), scales)
         sx_vals, sy_vals, dia_vals, ang_vals = self._unravel_rmax(self.rmax)
         return {'shift_x': sx_vals, 'shift_y': sy_vals,
                 'sphere_dia': dia_vals, 'angles': ang_vals,
+                'model_sum': self.msums.ravel()[self.rmax],
                 'frame_rescale': vscale}
 
-    def _calculate_rescale(self, dmodel, views, return_all=False):
-        detview = cp.zeros(self.det.num_pix, dtype='f8')
+    def _calculate_rescale(self, dmodel):
+        modelview = cp.zeros((self.size, self.size))
+        detview = cp.zeros(self.det.num_pix)
         sum_detview = cp.zeros_like(detview)
-        if return_all:
-            msums = cp.empty((self.tot_num_states, self.num_rot), dtype='f8')
 
         for r in range(self.tot_num_states):
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
-                     self.sphere_dia.ravel()[r], 1., 1., self.size, views[r]))
+                     self.sphere_dia.ravel()[r], 1., 1., self.size, modelview))
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (views[r], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
+                        (modelview, self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 0, detview))
                 sum_detview += detview
-                if return_all:
-                    msums[r,j] = detview.sum()
+                self.msums[r,j] = detview.sum()
         sum_detview /= self.tot_num_states * self.num_rot
         vscale = self.powder.sum() / sum_detview.sum()
 
-        if return_all:
-            return vscale, msums
         return vscale
 
-    def _calculate_prob(self, dmodel, scales, views):
-        vscale, msums = self._calculate_rescale(dmodel, views, return_all=True)
+    def _calculate_prob(self, dmodel, scales):
+        vscale = self._calculate_rescale(dmodel)
         print('Rescale =', vscale)
 
-        rot_views = cp.zeros((self.num_streams, self.det.num_pix))
+        model_views = cp.zeros((self.num_streams, self.size**2))
+        det_views = cp.zeros((self.num_streams, self.det.num_pix))
         self.maxprob[:] = -cp.finfo('f8').max
 
         stime = time.time()
@@ -99,16 +97,20 @@ class Estimator():
             snum = r % self.num_streams
             self.stream_list[snum].use()
 
+            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                    (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
+                     self.sphere_dia.ravel()[r], 1., 1., self.size, model_views[snum]))
+
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (views[r], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
-                         self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
+                        (model_views[snum], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
+                         self.size, self.det.num_pix, self.dset.bg, 1, det_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
-                        (rot_views[snum], self.probmask, self.dset.num_data,
+                        (det_views[snum], self.probmask, self.dset.num_data,
                          self.dset.ones, self.dset.multi,
                          self.dset.ones_accum, self.dset.multi_accum,
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(msums[r, j]*vscale), scales,
+                         -float(self.msums[r,j]*vscale), scales,
                          r*self.num_rot + j, self.rmax, self.maxprob))
 
             sys.stderr.write('\r%d/%d   ' % (r+1, self.tot_num_states))
