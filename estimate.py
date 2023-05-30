@@ -64,25 +64,24 @@ class Estimator():
                 'frame_rescale': vscale}
 
     def _calculate_rescale(self, dmodel, views, return_all=False):
-        selmask = cp.zeros((self.size,)*2, dtype='bool')
-        selmask[np.rint(self.det.cx+self.size//2).astype('i4'),
-                np.rint(self.det.cy+self.size//2).astype('i4')] = True
-        selmask = selmask.ravel()
+        detview = cp.zeros(self.det.num_pix, dtype='f8')
+        sum_detview = cp.zeros_like(detview)
+        if return_all:
+            msums = cp.empty((self.tot_num_states, self.num_rot), dtype='f8')
 
-        msums = cp.empty(self.tot_num_states)
-        sum_views = cp.zeros((self.num_streams, self.size**2))
-
-        for i, r in enumerate(range(self.tot_num_states)):
-            snum = i % self.num_streams
-            self.stream_list[snum].use()
+        for r in range(self.tot_num_states):
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                     (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
-                     self.sphere_dia.ravel()[r], 1., 1., self.size, views[i]))
-            msums[i] = views[i][selmask].sum()
-            sum_views[snum] += views[i]
-        [s.synchronize() for s in self.stream_list]
-        cp.cuda.Stream().null.use()
-        vscale = self.powder.sum() / sum_views.sum(0)[selmask].sum() * self.tot_num_states
+                     self.sphere_dia.ravel()[r], 1., 1., self.size, views[r]))
+            for j in range(self.num_rot):
+                self.k_slice_gen((self.bsize_pixel,), (32,),
+                        (views[r], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
+                         self.size, self.det.num_pix, self.dset.bg, 0, detview))
+                sum_detview += detview
+                if return_all:
+                    msums[r,j] = detview.sum()
+        sum_detview /= self.tot_num_states * self.num_rot
+        vscale = self.powder.sum() / sum_detview.sum()
 
         if return_all:
             return vscale, msums
@@ -96,26 +95,26 @@ class Estimator():
         self.maxprob[:] = -cp.finfo('f8').max
 
         stime = time.time()
-        for i, r in enumerate(range(self.tot_num_states)):
-            snum = i % self.num_streams
+        for r in range(self.tot_num_states):
+            snum = r % self.num_streams
             self.stream_list[snum].use()
 
             for j in range(self.num_rot):
                 self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (views[i], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
+                        (views[r], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
                          self.size, self.det.num_pix, self.dset.bg, 1, rot_views[snum]))
                 self.k_calc_prob_all((self.bsize_data,), (32,),
                         (rot_views[snum], self.probmask, self.dset.num_data,
                          self.dset.ones, self.dset.multi,
                          self.dset.ones_accum, self.dset.multi_accum,
                          self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(msums[i]*vscale), scales,
-                         i*self.num_rot + j, self.rmax, self.maxprob))
+                         -float(msums[r, j]*vscale), scales,
+                         r*self.num_rot + j, self.rmax, self.maxprob))
 
-            sys.stderr.write('\r%d/%d   ' % (i+1, self.tot_num_states))
+            sys.stderr.write('\r%d/%d   ' % (r+1, self.tot_num_states))
         [stream.synchronize() for stream in self.stream_list]
-        sys.stderr.write('\n')
         cp.cuda.Stream().null.use()
+        sys.stderr.write('\n')
 
         print('Estimated params: %.3f s' % (time.time()-stime))
         return vscale
