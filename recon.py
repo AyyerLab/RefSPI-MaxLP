@@ -100,9 +100,9 @@ class Recon():
         Current guess is assumed to be in self.model, which is updated. If scaling is included,
         the scale factors are in self.scales.
         '''
-        params_dict = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
-        self.model = self.phaser.run_phaser(self.model, params_dict, num_iter=num_phaser_iter).get()
-        self.save_output(self.model, params_dict, iternum)
+        self.est_params = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
+        self.model = self.phaser.run_phaser(self.model, self.est_params, num_iter=num_phaser_iter).get()
+        self.save_output(self.model, self.est_params, iternum)
 
     def save_output(self, model, params, iternum, intens=None):
         if iternum is None:
