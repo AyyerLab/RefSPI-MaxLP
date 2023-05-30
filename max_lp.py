@@ -149,7 +149,7 @@ class MaxLPhaser():
         step = cp.abs(fobj_v) / 4.
 
         curr_fobj_v = cp.empty(self.pattern.shape, dtype=fobj_v.dtype)
-        w_dv = cp.empty((len(const_v['fref_d']), len(curr_fobj_v)), dtype='c16')
+        w_dv = cp.empty((len(const_v['fref_d']), len(curr_fobj_v)), dtype='f8')
         bsize = int(cp.ceil(len(const_v['fref_d'])/32.))
         wshape = w_dv.shape
 
@@ -157,7 +157,8 @@ class MaxLPhaser():
             curr_fobj_v[:] = fobj_v + self.pattern*step
 
             self.k_get_w_dv((bsize,), (32,),
-                            (curr_fobj_v, const_v['fref_d'], wshape[0], wshape[1],
+                            (curr_fobj_v, const_v['fref_d'],
+                             wshape[0], wshape[1],
                              rescale, w_dv))
             vals = (const_v['k_d'] * cp.log(w_dv)).mean(0) - w_dv.mean(0)
 
@@ -236,7 +237,7 @@ class MaxLPhaser():
         fmag = cp.abs(fobj)
         #step = fmag / 4.
         step = cundimage.gaussian_filter(fmag, 10)
-        curr_mask = self.mask.copy()
+        curr_mask = self.mask.reshape(self.size, self.size).copy()
         num_pattern = len(self.pattern)
         pattern_size = num_pattern**0.5
         if full_output:
@@ -255,7 +256,9 @@ class MaxLPhaser():
                                        self.mphotons_t.data,
                                        self.dset.num_data, self.size**2, self.logq_v[j]))
             j_best = self.logq_v.argmax(0)
+            j_best[~curr_mask] = num_pattern // 2
             fobj += self.pattern[j_best] * step
+            # If center pattern is best, reduce step size. TODO: also apply to non-edges
             step[j_best == num_pattern // 2] /= pattern_size
             if full_output:
                 fconv_list.append(fobj.copy())
