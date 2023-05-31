@@ -128,3 +128,56 @@ class Estimator():
         dia_vals = cp.unique(self.sphere_dia)[dia]
         ang_vals = ang * 2 * cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
+
+    @staticmethod
+    def _get_dstates(gstates, params, d, order=1):
+        gsx = cp.array(gstates['shift_x'][:,0,0])
+        dsx = params['shift_x'][d] + (gsx-gsx.mean()) / gsx.size**order
+        gsy = cp.array(gstates['shift_y'][0,:,0])
+        dsy = params['shift_y'][d] + (gsy-gsy.mean()) / gsy.size**order
+        gdia = cp.array(gstates['sphere_dia'][0,0,:])
+        ddia = params['sphere_dia'][d] + (gdia-gdia.mean()) / gdia.size**order
+        return cp.meshgrid(dsx, dsy, ddia, indexing='ij')
+
+    def estimate_local(self, model, scales, states, num_rot, params, order=1):
+        '''Estimate latent parameters with a local search
+
+        For this search a different set of parameters are examined for each frame
+        '''
+        stime = time.time()
+        dparams = {'shift_x':[], 'shift_y':[],
+                   'sphere_dia':[], 'angles':[],
+                   'frame_rescale':params['frame_rescale']}
+        vscale = float(params['frame_rescale'])
+
+        dnum_rot = 5 if order == 1 else 1
+        prob = cp.zeros((states['shift_x'].size, dnum_rot))
+        for d in range(self.dset.num_data):
+            dsx, dsy, ddia = self._get_dstates(states, params, d, order=order)
+            if order == 1:
+                dang = params['angles'][d] + cp.linspace(-1,1,5) * 2*cp.pi/num_rot
+            else:
+                dang = cp.array([params['angles'][d]])
+            prob[:] = 0
+
+            self.k_get_prob_frame(prob.shape, (1,1),
+                                 (cp.array(model), self.size,
+                                  self.dset.place_ones[self.dset.ones_accum[d]:],
+                                  self.dset.place_multi[self.dset.multi_accum[d]:],
+                                  self.dset.count_multi[self.dset.multi_accum[d]:],
+                                  int(self.dset.ones[d]), int(self.dset.multi[d]),
+                                  dsx, dsy, ddia, prob.shape[0],
+                                  dang, prob.shape[1],
+                                  self.cx, self.cy, self.det.num_pix,
+                                  vscale, prob))
+
+            ind, aind = cp.unravel_index(prob.argmax(), prob.shape)
+            dparams['shift_x'].append(float(dsx.ravel()[ind]))
+            dparams['shift_y'].append(float(dsy.ravel()[ind]))
+            dparams['sphere_dia'].append(float(ddia.ravel()[ind]))
+            dparams['angles'].append(float(dang[aind]))
+            sys.stderr.write('\rFrame %d/%d'%(d+1, self.dset.num_data))
+        sys.stderr.write('\n')
+        print('Estimated params: %.3f s' % (time.time()-stime))
+
+        return dparams
