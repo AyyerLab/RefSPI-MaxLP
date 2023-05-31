@@ -288,13 +288,33 @@ void deduplicate(const int *indptr, const long long ndata,
     }
 }
 
+__device__
+complex<double> cinterp2d(const complex<double> *model, const long long size,
+                          const double cx, const double cy, const double angle) {
+    int cen = size / 2 ;
+    double ac = cos(angle), as = sin(angle) ;
+    double tx = cx * ac - cy * as + cen ;
+    double ty = cx * as + cy * ac + cen ;
+    int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
+    if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+        return 0. ;
+
+    double fx = tx - ix, fy = ty - iy ;
+    double gx = 1. - fx, gy = 1. - fy ;
+
+    return model[ix*size + iy]*gx*gy +
+           model[(ix+1)*size + iy]*fx*gy +
+           model[ix*size + (iy+1)]*gx*fy +
+           model[(ix+1)*size + (iy+1)]*fx*fy ;
+}
+
 __global__
 void get_prob_frame(const complex<double> *model, const long long size,
                     const int *p_o, const int *p_m, const int *c_m, const long long n_o, const long long n_m,
                     const double *sx, const double *sy, const double *dia, const long long nparams,
                     const double *angles, const long long nangs,
                     const double *cx, const double *cy, const long long npix,
-                    double *prob) {
+                    const double rescale, double *prob) {
     long long r = blockDim.x * blockIdx.x + threadIdx.x ;
     long long a = blockDim.y * blockIdx.y + threadIdx.y ;
     if (r >= nparams || a >= nangs)
@@ -303,56 +323,33 @@ void get_prob_frame(const complex<double> *model, const long long size,
     double shiftx = sx[r], shifty = sy[r], diameter = dia[r] ;
     double ang = angles[a] ;
 
-    long long t, pix ;
+    long long pix ;
     complex<double> fval ;
     double intens ;
     double ac = cos(ang), as = sin(ang) ;
     int cen = size / 2 ;
-    double tx, ty, fx, fy, gx, gy ;
-    int ix, iy ;
+    double tx, ty ;
+	int t_o = 0, t_m = 0 ;
 
-    for (t = 0 ; t < n_o ; ++t) {
-        pix = p_o[t] ;
-        tx = cx[pix] * ac - cy[pix] * as + cen ;
-        ty = cx[pix] * as + cy[pix] * ac + cen ;
+    for (pix = 0 ; pix < npix ; ++pix) {
+        tx = cx[pix] * ac - cy[pix] * as ;
+        ty = cx[pix] * as + cy[pix] * ac ;
 
-        fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) ;
+        fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) +
+			   cinterp2d(model, size, cx[pix], cy[pix], ang) ;
 
-        ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
-        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
-            continue ;
+        intens = pow(abs(fval), 2.) ;
+        prob[r*nangs + a] -= rescale * intens ;
 
-        fx = tx - ix, fy = ty - iy ;
-        gx = 1. - fx, gy = 1. - fy ;
-
-        fval += model[ix*size + iy]*gx*gy +
-                model[(ix+1)*size + iy]*fx*gy +
-                model[ix*size + (iy+1)]*gx*fy +
-                model[(ix+1)*size + (iy+1)]*fx*fy ;
-        intens = 2*log(abs(fval)) ;
-        prob[r*nangs + a] += intens ;
-    }
-
-    for (t = 0 ; t < n_m ; ++t) {
-        pix = p_m[t] ;
-        tx = cx[pix] * ac - cy[pix] * as + cen ;
-        ty = cx[pix] * as + cy[pix] * ac + cen ;
-
-        fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) ;
-
-        ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
-        if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
-            continue ;
-
-        fx = tx - ix, fy = ty - iy ;
-        gx = 1. - fx, gy = 1. - fy ;
-
-        fval += model[ix*size + iy]*gx*gy +
-                model[(ix+1)*size + iy]*fx*gy +
-                model[ix*size + (iy+1)]*gx*fy +
-                model[(ix+1)*size + (iy+1)]*fx*fy ;
-        intens = 2*log(abs(fval)) ;
-        prob[r*nangs + a] += intens ;
+		// Assuming sorted and non-overlapping p_o and p_m
+		if (p_o[t_o] == pix) {
+			prob[r*nangs + a] += log(intens) ;
+			++t_o ;
+		}
+		else if (p_m[t_m] == pix) {
+			prob[r*nangs + a] += c_m[t_m] * log(intens) ;
+			++t_m ;
+		}
     }
 }
 
