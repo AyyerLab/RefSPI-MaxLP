@@ -52,7 +52,7 @@ class MaxLPhaser():
         # photons = K_dt
         self.photons = (po_csr + pm_csr)[:self.num_data]
         # photons_t = K_td
-        self.photons_t = self.photons.transpose().tocsr()
+        #self.photons_t = self.photons.transpose().tocsr()
 
     def _get_qvals(self):
         '''Get detector and model coordinates and masks'''
@@ -92,7 +92,7 @@ class MaxLPhaser():
         for i, ang in enumerate(ang_samples):
             slice_ind = i // 64
             bit_shift = i % 64
-            rot = self._get_rot(-ang)
+            rot = self._get_rot(ang)
             rx = cp.rint(rot[0,0]*self.dx + rot[0,1]*self.dy + cen).astype('i4')
             ry = cp.rint(rot[1,0]*self.dx + rot[1,1]*self.dy + cen).astype('i4')
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
@@ -103,10 +103,13 @@ class MaxLPhaser():
         self.shifts = cp.array([params['shift_x'], params['shift_y']]).T
         self.diams = cp.array(params['sphere_dia'])
         self.ang = cp.array(params['angles'])
+        self.ang_ind = cp.searchsorted(self.ang_samples, self.ang).astype('u8')
         rescale = float(params['frame_rescale'])
 
         stime = time.time()
-        self.rots = self._get_rot(self.ang).transpose(2, 0, 1)
+        print('Rotating by ang_samples')
+        self.rots = self._get_rot(self.ang_samples[self.ang_ind]).transpose(2, 0, 1)
+        #self.rots = self._get_rot(self.ang).transpose(2, 0, 1)
         self._rotate_photons()
 
         fconv = self.run_all_pattern(fconv, rescale, num_iter=num_iter)
@@ -173,13 +176,7 @@ class MaxLPhaser():
         return fobj_v
 
     def get_voxel_constants(self, v , frac=None):
-        good_angs = cp.zeros((0,), dtype='i4')
-        for i in range(len(self.sampled_mask)):
-            slice_good_angs = cp.where(self.sampled_mask[i,v] & (1 << cp.arange(64, dtype='u8')) > 0)[0]
-            good_angs = cp.append(good_angs, slice_good_angs)
-        good_angs = self.ang_samples[good_angs]
-        d_vals = cp.where(cp.isin(self.ang, good_angs))[0]
-
+        d_vals = cp.where(self.sampled_mask[self.ang_ind//64, v] & (1 << (self.ang_ind % 64)) > 0)[0]
         if frac is not None:
             d_vals = cp.random.choice(d_vals, int(cp.round(self.num_data*frac)), replace=False)
 
@@ -251,7 +248,7 @@ class MaxLPhaser():
                 self.k_get_logq_voxel((self.size**2,), (1,),
                                       (curr_fobj, rescale,  curr_mask,
                                        self.diams, self.shifts, self.mqvals,
-                                       self.ang, self.sampled_mask,
+                                       self.ang_ind, self.sampled_mask,
                                        self.mphotons_t.indptr, self.mphotons_t.indices,
                                        self.mphotons_t.data,
                                        self.dset.num_data, self.size**2, self.logq_v[j]))
