@@ -129,6 +129,25 @@ class Estimator():
         ang_vals = ang * 2 * cp.pi / self.num_rot
         return sx_vals, sy_vals, dia_vals, ang_vals
 
+    def _calculate_rescale_local(self, dmodel, params):
+        '''Maximum likelihood rescale given model and parameters'''
+        modelview = cp.zeros((self.size, self.size))
+        detview = cp.zeros(self.det.num_pix)
+        sum_detview = cp.zeros_like(detview)
+
+        for d in range(self.dset.num_data):
+            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                    (dmodel, params['shift_x'][d], params['shift_y'][d],
+                     params['sphere_dia'][d], 1., 1., self.size, modelview))
+            self.k_slice_gen((self.bsize_pixel,), (32,),
+                    (modelview, self.cx, self.cy, params['angles'][d], 1.,
+                     self.size, self.det.num_pix, self.dset.bg, 0, detview))
+            sum_detview += detview
+        sum_detview /= self.dset.num_data
+        vscale = self.powder.sum() / sum_detview.sum()
+
+        return vscale
+
     @staticmethod
     def _get_dstates(gstates, params, d, order=1):
         gsx = cp.array(gstates['shift_x'][:,0,0])
