@@ -22,7 +22,7 @@ class MaxLPhaser():
         with open('kernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
         self.k_get_w_dv = kernels.get_function('get_w_dv')
-        self.k_get_logq_voxel = kernels.get_function('get_logq_voxel')
+        self.k_get_logq_pattern = kernels.get_function('get_logq_pattern')
         self.k_rotate_photons = kernels.get_function('rotate_photons')
         self.k_deduplicate = kernels.get_function('deduplicate')
 
@@ -239,19 +239,19 @@ class MaxLPhaser():
         pattern_size = num_pattern**0.5
         if full_output:
             fconv_list = [fobj.copy()]
+        bsize = int(cp.ceil(self.size**2/32.))
 
         stime = time.time()
         for i in range(num_iter):
             self.logq_v[:] = 0
-            for j in range(num_pattern):
-                curr_fobj = fobj + self.pattern[j]*step
-                self.k_get_logq_voxel((self.size**2,), (1,),
-                                      (curr_fobj, rescale,  curr_mask,
-                                       self.diams, self.shifts, self.mqvals,
-                                       self.ang_ind, self.sampled_mask,
-                                       self.mphotons_t.indptr, self.mphotons_t.indices,
-                                       self.mphotons_t.data,
-                                       self.dset.num_data, self.size**2, self.logq_v[j]))
+            self.k_get_logq_pattern((num_pattern, bsize), (1, 32),
+                                    (fobj, rescale, curr_mask,
+                                     self.pattern, num_pattern, step,
+                                     self.diams, self.shifts, self.mqvals,
+                                     self.ang_ind, self.sampled_mask,
+                                     self.mphotons_t.indptr, self.mphotons_t.indices,
+                                     self.mphotons_t.data,
+                                     self.dset.num_data, self.size**2, self.logq_v))
             j_best = self.logq_v.argmax(0)
             j_best[~curr_mask] = num_pattern // 2
             fobj += self.pattern[j_best] * step
