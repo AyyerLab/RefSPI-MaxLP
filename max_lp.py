@@ -261,7 +261,7 @@ class MaxLPhaser():
                 fconv_list.append(fobj.copy())
             #curr_mask[step/fmag < 1e-3] = False
             sys.stderr.write('\rMaxLP iteration %d/%d: ' % (i+1, num_iter))
-            sys.stderr.write('%d/%d voxels centered '%((j_best==num_pattern//2).sum(), (self.mask>0).sum()))
+            sys.stderr.write('%d/%d voxels centered '%((j_best[curr_mask]==num_pattern//2).sum(), curr_mask.sum()))
             sys.stderr.write('(%.2f s/iteration) '%((time.time()-stime) / (i+1)))
         sys.stderr.write('\n')
         if full_output:
