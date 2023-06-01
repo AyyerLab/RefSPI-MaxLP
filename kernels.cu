@@ -132,7 +132,7 @@ void get_w_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
 __global__
 void get_logq_voxel(const complex<double> *fobj, const double rescale, const bool *mask,
                     const double *diams, const double *shifts, const double *qvals,
-                    const long long *ang_ind, const unsigned long long *sampled_mask,
+                    const unsigned long long *ang_ind, const unsigned long long *sampled_mask,
                     const int *indptr, const int *indices, const double *data,
                     const long long ndata, const long long nvox, double *logq_v) {
     long long d, v ;
