@@ -130,18 +130,21 @@ void get_w_dv(const complex<double> *fobj_v, const complex<double> *fref_d,
 }
 
 __global__
-void get_logq_voxel(const complex<double> *fobj, const double rescale, const bool *mask,
-                    const double *diams, const double *shifts, const double *qvals,
-                    const unsigned long long *ang_ind, const unsigned long long *sampled_mask,
-                    const int *indptr, const int *indices, const double *data,
-                    const long long ndata, const long long nvox, double *logq_v) {
-    long long d, v ;
-    v = blockDim.x * blockIdx.x + threadIdx.x ;
-    if (v >= nvox || (!mask[v]))
+void get_logq_pattern(const complex<double> *fobj, const double rescale, const bool *mask,
+                      const complex<double> *pattern, const long long npattern, const double *step,
+                      const double *diams, const double *shifts, const double *qvals,
+                      const unsigned long long *ang_ind, const unsigned long long *sampled_mask,
+                      const int *indptr, const int *indices, const double *data,
+                      const long long ndata, const long long nvox, double *logq_pv) {
+    long long d, v, p = 0 ;
+    p = blockDim.x * blockIdx.x + threadIdx.x ;
+    v = blockDim.y * blockIdx.y + threadIdx.y ;
+    if (p >= npattern || v >= nvox || (!mask[v]))
         return ;
 
     double qx = qvals[v*3 + 0], qy = qvals[v*3 + 1], qrad = qvals[v*3 + 2] ;
-    double fobj_vr = fobj[v].real(), fobj_vi = fobj[v].imag() ;
+    complex<double> fpatt = fobj[v] + pattern[p] * step[v] ;
+    double fobj_vr = fpatt.real(), fobj_vi = fpatt.imag() ;
 
     // indptr, indices, data refer to (N_voxel, N_data) sparse array
     int ind_st = indptr[v], num_ind = indptr[v+1] - ind_st ;
@@ -165,12 +168,12 @@ void get_logq_voxel(const complex<double> *fobj, const double rescale, const boo
         sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampi, &rampr) ;
 
         w = rescale * (pow(fobj_vr + sphere_ft*rampr, 2.) + pow(fobj_vi + sphere_ft*rampi, 2.)) ;
-        logq_v[v] -= w ;
+        logq_pv[p*nvox + v] -= w ;
 
         // Assuming sorted indices
         // Assuming photon data is "rotated"
         if (indices[ind_st + ind_pos] == d) {
-            logq_v[v] += data[ind_st + ind_pos] * log(w) ;
+            logq_pv[p*nvox + v] += data[ind_st + ind_pos] * log(w) ;
             ind_pos++ ;
         }
 
@@ -327,29 +330,28 @@ void get_prob_frame(const complex<double> *model, const long long size,
     complex<double> fval ;
     double intens ;
     double ac = cos(ang), as = sin(ang) ;
-    int cen = size / 2 ;
     double tx, ty ;
-	int t_o = 0, t_m = 0 ;
+    int t_o = 0, t_m = 0 ;
 
     for (pix = 0 ; pix < npix ; ++pix) {
         tx = cx[pix] * ac - cy[pix] * as ;
         ty = cx[pix] * as + cy[pix] * ac ;
 
         fval = rampsphere(tx/size, ty/size, shiftx, shifty, diameter) +
-			   cinterp2d(model, size, cx[pix], cy[pix], ang) ;
+               cinterp2d(model, size, cx[pix], cy[pix], ang) ;
 
         intens = pow(abs(fval), 2.) ;
         prob[r*nangs + a] -= rescale * intens ;
 
-		// Assuming sorted and non-overlapping p_o and p_m
-		if (p_o[t_o] == pix) {
-			prob[r*nangs + a] += log(intens) ;
-			++t_o ;
-		}
-		else if (p_m[t_m] == pix) {
-			prob[r*nangs + a] += c_m[t_m] * log(intens) ;
-			++t_m ;
-		}
+        // Assuming sorted and non-overlapping p_o and p_m
+        if (p_o[t_o] == pix) {
+            prob[r*nangs + a] += log(intens) ;
+            ++t_o ;
+        }
+        else if (p_m[t_m] == pix) {
+            prob[r*nangs + a] += c_m[t_m] * log(intens) ;
+            ++t_m ;
+        }
     }
 }
 
