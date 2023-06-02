@@ -244,7 +244,6 @@ void rotate_photons(const int *indptr, const double *angles,
         //indices[t] = pos[0] ;
         indices[t] = ix * size + iy ;
     }
-
 }
 
 __global__
@@ -352,6 +351,70 @@ void get_prob_frame(const complex<double> *model, const long long size,
             prob[r*nangs + a] += c_m[t_m] * log(intens) ;
             ++t_m ;
         }
+    }
+}
+
+/* Descending argsort for 4 numbers with 6 comparisons */
+__device__
+void argsort4(const double vals[4], int sorter[4]) {
+  int i, j, tmp ;
+  for (i = 0 ; i < 4 ; ++i)
+    sorter[i] = i ;
+
+  for (i = 0 ; i < 3 ; ++i) {
+    for (j = i+1 ; j < 4 ; ++j) {
+      if (vals[sorter[i]] < vals[sorter[j]]) {
+        tmp = sorter[i] ;
+        sorter[i] = sorter[j] ;
+        sorter[j] = tmp ;
+      }
+    }
+  }
+}
+
+__global__
+void rotate_sparse_interp(const int *indices, const double *data, const long long num_ind,
+                          const double *cx, const double *cy, const double angle,
+                          const long long size, double *dense) {
+    long long t = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (t >= num_ind)
+      return ;
+
+    int pix = indices[t] ;
+    int cen = size / 2 ;
+    double ac = cos(angle), as = sin(angle) ;
+    double tx = cx[pix] * ac - cy[pix] * as + cen ;
+    double ty = cx[pix] * as + cy[pix] * ac + cen ;
+    int ix = __double2int_rd(tx), iy = __double2int_rd(ty) ;
+    if (ix < 0 || ix > size - 2 || iy < 0 || iy > size - 2)
+        return ;
+    int pos_x, pos_y ;
+
+    double fx = tx - ix, fy = ty - iy ;
+    if (data[t] == 1.) {
+        pos_x = ix + (fx > 0.5) ;
+        pos_y = iy + (fy > 0.5) ;
+        atomicAdd(&dense[pos_x*size + pos_y], 1.) ;
+        return ;
+    }
+
+    double gx = 1. - fx, gy = 1. - fy ;
+    double w[4] = {gx*gy, gx*fy, fx*gy, fx*fy} ;
+    double val = data[t], base = 0, res ;
+    int i, sorter[4] ;
+    for (i = 0 ; i < 4 ; ++i) {
+        pos_x = ix + (i > 1) ;
+        pos_y = iy + (i % 2) ;
+        atomicAdd(&dense[pos_x*size + pos_y], floor(w[i] * val)) ;
+        base += floor(w[i] * val) ;
+    }
+
+    res = val - base ;
+    argsort4(w, sorter) ;
+    for (i = 0 ; i < res ; ++i) {
+        pos_x = ix + (sorter[i] > 1) ;
+        pos_y = iy + (sorter[i] % 2) ;
+        atomicAdd(&dense[pos_x*size + pos_y], 1.) ;
     }
 }
 
