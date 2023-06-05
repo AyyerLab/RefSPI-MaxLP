@@ -79,9 +79,12 @@ class Recon():
         self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
         print(int(self.states['num_states'].prod()), 'sampled states')
 
-    def _init_model(self):
+    def _init_model(self, model_fname=None):
         self.model = np.empty((self.size**2,), dtype='c16')
-        self._random_model()
+        if model_fname is None:
+            self._random_model()
+        else:
+            self._load_model(model_fname)
 
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
@@ -100,9 +103,9 @@ class Recon():
         Current guess is assumed to be in self.model, which is updated. If scaling is included,
         the scale factors are in self.scales.
         '''
-        self.est_params = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
-        self.model = self.phaser.run_phaser(self.model, self.est_params, num_iter=num_phaser_iter).get()
-        self.save_output(self.model, self.est_params, iternum)
+        self.params = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
+        self.model = self.phaser.run_phaser(self.model, self.params, num_iter=num_phaser_iter).get()
+        self.save_output(self.model, self.params, iternum)
 
     def save_output(self, model, params, iternum, intens=None):
         if iternum is None:
@@ -111,8 +114,6 @@ class Recon():
 
         with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
             fptr['model'] = self.model.reshape((self.size,)*2)
-            if intens is not None:
-                fptr['intens'] = intens.get()
 
             fptr['angles'] = params['angles'].get()
             fptr['diameters'] = params['sphere_dia'].get()
@@ -134,6 +135,21 @@ class Recon():
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
         #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
         self.model *= 1e-7 * (np.abs(self.model)**2).mean()
+
+    def _load_model(self, model_fname):
+        with h5py.File(model_fname, 'r') as f:
+            if 'model' in f:
+                names = ['model', 'angles', 'shifts', 'diameters']
+            elif 'true_model' in f:
+                names = ['true_model', 'true_angles', 'true_shifts', 'true_diameters']
+            else:
+                raise ValueError('Model file must contain "model" or "true_model" dataset')
+            self.model = f[names[0]][:]
+            self.params = {}
+            self.params['angles'] = cp.array(f[names[1]][:])
+            self.params['shift_x'] = cp.array(f[names[2]][:,0])
+            self.params['shift_y'] = cp.array(f[names[2]][:,1])
+            self.params['sphere_dia'] = cp.array(f[names[3]][:])
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
