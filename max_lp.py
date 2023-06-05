@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 import cupy as cp
-from cupyx.scipy import sparse
+from cupyx.scipy import sparse as cusparse
 from cupyx.scipy import ndimage as cundimage
 
 class MaxLPhaser():
@@ -25,6 +25,7 @@ class MaxLPhaser():
         self.k_get_logq_pattern = kernels.get_function('get_logq_pattern')
         self.k_rotate_photons = kernels.get_function('rotate_photons')
         self.k_deduplicate = kernels.get_function('deduplicate')
+        self.k_rotate_sparse_interp = kernels.get_function('rotate_sparse_interp')
 
     def _gen_pattern(self, nmax):
         ind = cp.arange(-nmax, nmax+0.5, 1)
@@ -38,12 +39,12 @@ class MaxLPhaser():
         else:
             self.num_data = num_data
 
-        po_csr = sparse.csr_matrix((cp.ones_like(self.dset.place_ones, dtype='f8'),
+        po_csr = cusparse.csr_matrix((cp.ones_like(self.dset.place_ones, dtype='f8'),
                                     self.dset.place_ones,
                                     cp.append(self.dset.ones_accum, len(self.dset.place_ones)),),
                                    shape=(self.dset.num_data, self.det.num_pix),
                                    copy=False)
-        pm_csr = sparse.csr_matrix((self.dset.count_multi.astype('f8'),
+        pm_csr = cusparse.csr_matrix((self.dset.count_multi.astype('f8'),
                                     self.dset.place_multi,
                                     cp.append(self.dset.multi_accum, len(self.dset.place_multi)),),
                                    shape=(self.dset.num_data, self.det.num_pix),
@@ -98,7 +99,7 @@ class MaxLPhaser():
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
         print('Generated sampled_mask matrix')
 
-    def run_phaser(self, model, params, num_iter=10):
+    def run_phaser(self, model, params, rotphotons_order=1, num_iter=10):
         fconv = cp.array(model).copy()
         self.shifts = cp.array([params['shift_x'], params['shift_y']]).T
         self.diams = cp.array(params['sphere_dia'])
@@ -108,9 +109,7 @@ class MaxLPhaser():
 
         stime = time.time()
         print('Rotating by ang_samples')
-        self.rots = self._get_rot(self.ang_samples[self.ang_ind]).transpose(2, 0, 1)
-        #self.rots = self._get_rot(self.ang).transpose(2, 0, 1)
-        self._rotate_photons()
+        self._rotate_photons(interp_order=rotphotons_order)
 
         fconv = self.run_all_pattern(fconv, rescale, num_iter=num_iter)
 
@@ -122,25 +121,44 @@ class MaxLPhaser():
         s = cp.sin(ang)
         return cp.array([[c, -s], [s, c]])
 
-    def _rotate_photons(self):
+    def _rotate_photons(self, interp_order=1):
         '''Generate model-space rotated sparse photons file'''
-        pindices = self.photons.indices
-        cx = self.dx[self.photons.indices]
-        cy = self.dy[self.photons.indices]
-        mindices = cp.empty_like(self.photons.indices)
-        cen = self.size // 2
-        for d in range(self.num_data):
-            s = self.photons.indptr[d]
-            e = self.photons.indptr[d+1]
-            rx = cp.rint(self.rots[d,0,0]*cx[s:e] + self.rots[d,0,1]*cy[s:e] + cen).astype('i4')
-            ry = cp.rint(self.rots[d,1,0]*cx[s:e] + self.rots[d,1,1]*cy[s:e] + cen).astype('i4')
-            mindices[s:e] = rx*self.size + ry
+        if interp_order == 0:
+            rots = self._get_rot(self.ang_samples[self.ang_ind]).transpose(2, 0, 1)
+            #rots = self._get_rot(self.ang).transpose(2, 0, 1)
+            pindices = self.photons.indices
+            cx = self.dx[self.photons.indices]
+            cy = self.dy[self.photons.indices]
+            mindices = cp.empty_like(self.photons.indices)
+            cen = self.size // 2
+            for d in range(self.num_data):
+                s = self.photons.indptr[d]
+                e = self.photons.indptr[d+1]
+                rx = cp.rint(rots[d,0,0]*cx[s:e] + rots[d,0,1]*cy[s:e] + cen).astype('i4')
+                ry = cp.rint(rots[d,1,0]*cx[s:e] + rots[d,1,1]*cy[s:e] + cen).astype('i4')
+                mindices[s:e] = rx*self.size + ry
 
-        self.mphotons = sparse.csr_matrix((self.photons.data,
-                                           mindices,
-                                           self.photons.indptr),
-                                          shape=(self.num_data, self.size**2),
-                                          copy=False)
+            self.mphotons = sparse.csr_matrix((self.photons.data,
+                                               mindices,
+                                               self.photons.indptr),
+                                              shape=(self.num_data, self.size**2),
+                                              copy=False)
+        elif interp_order == 1:
+            dense = cp.zeros((1, self.size**2), dtype='f8')
+            frlist = []
+            for d in range(self.num_data):
+                dense[:] = 0
+                ind_st = self.photons.indptr[d]
+                num_ind = (self.photons.indptr[d+1] - ind_st).item()
+                self.k_rotate_sparse_interp((num_ind//32 + 1,), (32,),
+                                            (self.photons.indices[ind_st:], self.photons.data[ind_st:], num_ind,
+                                             self.dx, self.dy, self.ang_samples[self.ang_ind[d]].item(),
+                                             self.size, dense))
+                frlist.append(cusparse.csr_matrix(dense))
+                sys.stderr.write('\r%d/%d'%(d+1, self.num_data))
+            sys.stderr.write('\n')
+            self.mphotons = cusparse.vstack(frlist)
+
         self.mphotons_t = self.mphotons.transpose().tocsr()
         self.mphotons_t.sort_indices()
         self.mphotons_t.sum_duplicates()
@@ -206,7 +224,7 @@ class MaxLPhaser():
         if not isinstance(fobj_v, cp.ndarray):
             fobj_v = cp.array([fobj_v])
 
-        w_dv = cp.empty((len(const['fref_d']), len(fobj_v)), dtype='c16')
+        w_dv = cp.empty((len(const['fref_d']), len(fobj_v)), dtype='f8')
         bsize = int(cp.ceil(len(const['fref_d'])/32.))
         self.k_get_w_dv((bsize,), (32,),
                         (fobj_v, const['fref_d'], len(const['fref_d']),
