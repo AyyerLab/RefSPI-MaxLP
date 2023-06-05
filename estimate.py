@@ -137,8 +137,8 @@ class Estimator():
 
         for d in range(self.dset.num_data):
             self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, params['shift_x'][d], params['shift_y'][d],
-                     params['sphere_dia'][d], 1., 1., self.size, modelview))
+                    (dmodel, params['shift_x'][d].item(), params['shift_y'][d].item(),
+                     params['sphere_dia'][d].item(), 1., 1., self.size, modelview))
             self.k_slice_gen((self.bsize_pixel,), (32,),
                     (modelview, self.cx, self.cy, params['angles'][d], 1.,
                      self.size, self.det.num_pix, self.dset.bg, 0, detview))
@@ -164,10 +164,11 @@ class Estimator():
         For this search a different set of parameters are examined for each frame
         '''
         stime = time.time()
+        dmodel = cp.array(model)
+        drescale = self._calculate_rescale_local(dmodel, params)
         dparams = {'shift_x':[], 'shift_y':[],
                    'sphere_dia':[], 'angles':[],
-                   'frame_rescale':params['frame_rescale']}
-        vscale = float(params['frame_rescale'])
+                   'frame_rescale': drescale}
 
         dnum_rot = 5 if order == 1 else 1
         prob = cp.zeros((states['shift_x'].size, dnum_rot))
@@ -180,7 +181,7 @@ class Estimator():
             prob[:] = 0
 
             self.k_get_prob_frame(prob.shape, (1,1),
-                                 (cp.array(model), self.size,
+                                 (dmodel, self.size,
                                   self.dset.place_ones[self.dset.ones_accum[d]:],
                                   self.dset.place_multi[self.dset.multi_accum[d]:],
                                   self.dset.count_multi[self.dset.multi_accum[d]:],
@@ -188,7 +189,7 @@ class Estimator():
                                   dsx, dsy, ddia, prob.shape[0],
                                   dang, prob.shape[1],
                                   self.cx, self.cy, self.det.num_pix,
-                                  vscale, prob))
+                                  drescale, prob))
 
             ind, aind = cp.unravel_index(prob.argmax(), prob.shape)
             dparams['shift_x'].append(float(dsx.ravel()[ind]))
