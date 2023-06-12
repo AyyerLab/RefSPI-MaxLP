@@ -152,7 +152,7 @@ class DataGenerator():
             h5f['true_diameters'] = diameters
             h5f['true_angles'] = angles
             h5f['true_model'] = model.get() / self.rel_scale
-            h5f['frame_rescale'] = rescale.item()
+            h5f['frame_rescale'] = rescale.item() * self.rel_scale**2
             if self.bgmask_sum > 0:
                 h5f['bg'] = self.bgmask.get()
 
