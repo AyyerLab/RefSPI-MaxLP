@@ -357,19 +357,19 @@ void get_prob_frame(const complex<double> *model, const long long size,
 /* Descending argsort for 4 numbers with 6 comparisons */
 __device__
 void argsort4(const double vals[4], int sorter[4]) {
-  int i, j, tmp ;
-  for (i = 0 ; i < 4 ; ++i)
-    sorter[i] = i ;
+    int i, j, tmp ;
+    for (i = 0 ; i < 4 ; ++i)
+        sorter[i] = i ;
 
-  for (i = 0 ; i < 3 ; ++i) {
-    for (j = i+1 ; j < 4 ; ++j) {
-      if (vals[sorter[i]] < vals[sorter[j]]) {
-        tmp = sorter[i] ;
-        sorter[i] = sorter[j] ;
-        sorter[j] = tmp ;
-      }
+    for (i = 0 ; i < 3 ; ++i) {
+        for (j = i+1 ; j < 4 ; ++j) {
+            if (vals[sorter[i]] < vals[sorter[j]]) {
+                tmp = sorter[i] ;
+                sorter[i] = sorter[j] ;
+                sorter[j] = tmp ;
+            }
+        }
     }
-  }
 }
 
 __global__
