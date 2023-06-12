@@ -99,7 +99,7 @@ class MaxLPhaser():
             self.sampled_mask[slice_ind, rx*self.size + ry] |= 1 << bit_shift
         print('Generated sampled_mask matrix')
 
-    def run_phaser(self, model, params, rotphotons_order=1, num_iter=10):
+    def run_phaser(self, model, params, num_iter=10, rotphotons_order=1):
         fconv = cp.array(model).copy()
         self.shifts = cp.array([params['shift_x'], params['shift_y']]).T
         self.diams = cp.array(params['sphere_dia'])
@@ -114,7 +114,8 @@ class MaxLPhaser():
         fconv = self.run_all_pattern(fconv, rescale, num_iter=num_iter)
 
         print('Updated model: %3f s' % (time.time() - stime))
-        return 0.5 * (fconv + fconv.conj()[::-1,::-1])
+
+        return self._symmetrize(fconv)
 
     def _get_rot(self, ang):
         c = cp.cos(ang)
@@ -138,11 +139,11 @@ class MaxLPhaser():
                 ry = cp.rint(rots[d,1,0]*cx[s:e] + rots[d,1,1]*cy[s:e] + cen).astype('i4')
                 mindices[s:e] = rx*self.size + ry
 
-            self.mphotons = sparse.csr_matrix((self.photons.data,
-                                               mindices,
-                                               self.photons.indptr),
-                                              shape=(self.num_data, self.size**2),
-                                              copy=False)
+            self.mphotons = cusparse.csr_matrix((self.photons.data,
+                                                 mindices,
+                                                 self.photons.indptr),
+                                                shape=(self.num_data, self.size**2),
+                                                copy=False)
         elif interp_order == 1:
             dense = cp.zeros((1, self.size**2), dtype='f8')
             frlist = []
@@ -163,6 +164,16 @@ class MaxLPhaser():
         self.mphotons_t.sort_indices()
         self.mphotons_t.sum_duplicates()
         print('Rotated photons')
+
+    def _symmetrize(self, fconv):
+        mask = (self.sampled_mask > 0).sum(axis=0).reshape(self.size, self.size) > 0
+        flip_mask = mask[::-1,::-1]
+        flip_fconv = fconv.conj()[::-1,::-1]
+        sym_fconv = cp.zeros_like(fconv)
+        sym_fconv[mask & flip_mask] = 0.5 * (fconv[mask & flip_mask] + flip_fconv[mask & flip_mask])
+        sym_fconv[mask & ~flip_mask] = fconv[mask & ~flip_mask]
+        sym_fconv[~mask & flip_mask] = flip_fconv[~mask & flip_mask]
+        return sym_fconv
 
     def run_voxel_pattern(self, fobj_v, v, rescale, num_iter=10, frac=None):
         '''Optimize model for given model voxel v using pattern search'''
@@ -249,12 +260,15 @@ class MaxLPhaser():
         return const['k_d'].mean() / w_dv.mean(0)
 
     def run_all_pattern(self, fobj, rescale, num_iter=10, full_output=False):
-        fmag = cp.abs(fobj)
-        #step = fmag / 4.
-        step = cundimage.gaussian_filter(fmag, 10)
         curr_mask = self.mask.reshape(self.size, self.size).copy()
         num_pattern = len(self.pattern)
         pattern_size = num_pattern**0.5
+
+        fmag = cp.abs(fobj)
+        #step = fmag / 4.
+        #step = cundimage.gaussian_filter(fmag, 10)
+        step = cundimage.gaussian_filter(fmag, 10) / pattern_size * 2
+
         if full_output:
             fconv_list = [fobj.copy()]
         bsize = int(cp.ceil(self.size**2/32.))
