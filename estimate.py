@@ -33,7 +33,7 @@ class Estimator():
         self.rmax = cp.zeros(self.dset.num_data, dtype='i8')
 
     def _compile_kernels(self):
-        with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
+        with open(op.join(op.dirname(__file__), 'ekernels.cu'), 'r') as f:
             kernels = cp.RawModule(code=f.read())
         self.k_slice_gen = kernels.get_function('slice_gen')
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')

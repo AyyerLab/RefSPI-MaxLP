@@ -19,7 +19,7 @@ class MaxLPhaser():
         self.logq_v = cp.zeros((len(self.pattern), self.size, self.size))
 
     def _load_kernels(self):
-        with open('kernels.cu', 'r') as f:
+        with open('mkernels.cu', 'r') as f:
             kernels = cp.RawModule(code=f.read())
         self.k_get_w_dv = kernels.get_function('get_w_dv')
         self.k_get_logq_pattern = kernels.get_function('get_logq_pattern')
