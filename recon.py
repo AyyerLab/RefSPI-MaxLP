@@ -24,16 +24,17 @@ class Recon():
 
     The appropriate CUDA device must be selected before initializing the class.
     '''
-    def __init__(self, config_file, num_streams=4):
+    def __init__(self, config_file, resume=False, num_streams=4):
         self.num_streams = num_streams
 
         config = configparser.ConfigParser()
         config.read(config_file)
-        self._parse_params(config, op.dirname(config_file))
-        self._parse_detector(config, op.dirname(config_file))
-        self._parse_data(config, op.dirname(config_file))
+        config_dir = op.dirname(config_file)
+        self._parse_params(config, config_dir)
+        self._parse_detector(config, config_dir)
+        self._parse_data(config, config_dir)
         self._generate_states(config)
-        self._init_model()
+        self.iternum = self._init_model(config, config_dir, resume=resume)
 
         self.estimator = Estimator(self.dset, self.det, self.size, num_streams=num_streams)
         self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
@@ -80,23 +81,34 @@ class Recon():
         self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
         print(int(self.states['num_states'].prod()), 'sampled states')
 
-    def _init_model(self, model_fname=None):
+    def _init_model(self, config, start_dir, resume=False):
+        last_iter = 0
+        model_fname = config.get('emc', 'start_model_file', fallback=None)
+        if model_fname is not None:
+            model_fname = op.join(start_dir, model_fname)
+
+        if resume:
+            with open(self.log_file, 'r') as f:
+                last_line = f.readlines()[-1].strip()
+            last_iter = int(last_line.split()[0])
+            # Overwrite start_model_file if exists
+            model_fname = op.join(self.output_folder, 'output_%.3d.h5' % last_iter)
+
         self.model = np.empty((self.size**2,), dtype='c16')
+
         if model_fname is None:
             self._random_model()
         else:
             self._load_model(model_fname)
 
-        if self.need_scaling:
-            self.scales = self.dset.counts / self.dset.mean_count
-        else:
-            self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
+        if not resume:
+            with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
+                f['model'] = self.model
+                f['scale'] = self.scales.get()
 
-        with h5py.File(op.join(self.output_folder, 'output_000.h5'), 'w') as f:
-            f['model'] = self.model
-            f['scale'] = self.scales.get()
+        return last_iter + 1
 
-    def run_iteration(self, iternum=None, num_phaser_iter=10):
+    def run_iteration(self, num_phaser_iter=10):
         '''Run one iteration of reconstruction algorithm
 
         Args:
@@ -106,19 +118,18 @@ class Recon():
         '''
         self.params = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
         self.model = self.phaser.run_phaser(self.model, self.params, num_iter=num_phaser_iter).get()
-        self.save_output(self.model, self.params, iternum)
+        self.save_output(self.model, self.params)
+        self.iternum += 1
 
-    def save_output(self, model, params, iternum, intens=None):
-        if iternum is None:
-            np.save(op.join(self.output_folder, 'model.npy'), self.model)
-            return
-
-        with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%iternum), 'w') as fptr:
+    def save_output(self, model, params, intens=None):
+        with h5py.File(op.join(self.output_folder, 'output_%.3d.h5'%self.iternum), 'w') as fptr:
             fptr['model'] = self.model.reshape((self.size,)*2)
 
             fptr['angles'] = params['angles'].get()
             fptr['diameters'] = params['sphere_dia'].get()
             fptr['shifts'] = np.array([params['shift_x'].get(), params['shift_y'].get()]).T
+            if self.need_scaling:
+                fptr['scale'] = scales
 
     def _random_model(self):
         rmodel = np.zeros((self.size,)*2)
@@ -136,6 +147,10 @@ class Recon():
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
         #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
         self.model *= 1e-7 * (np.abs(self.model)**2).mean()
+        if self.need_scaling:
+            self.scales = self.dset.counts / self.dset.mean_count
+        else:
+            self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
 
     def _load_model(self, model_fname):
         with h5py.File(model_fname, 'r') as f:
@@ -151,6 +166,10 @@ class Recon():
             self.params['shift_x'] = cp.array(f[names[2]][:,0])
             self.params['shift_y'] = cp.array(f[names[2]][:,1])
             self.params['sphere_dia'] = cp.array(f[names[3]][:])
+            if self.need_scaling:
+                self.scales = f['scale'][:]
+            else:
+                self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
 
 def main():
     '''Parses command line arguments and launches EMC reconstruction'''
@@ -163,26 +182,31 @@ def main():
                         help='Number of streams to use (default=4)')
     parser.add_argument('-d', '--device', type=int, default=0,
                         help='Device index (default=0)')
+    parser.add_argument('-r', '--resume', action='store_true',
+                        help='Resume previous reconstruction')
     args = parser.parse_args()
 
     print('Running on device', args.device)
     cp.cuda.Device(args.device).use()
 
-    recon = Recon(args.config_file, num_streams=args.streams)
-    logf = open(recon.log_file, 'w')
-    logf.write('Iter  time(s)  change\n')
-    logf.flush()
+    recon = Recon(args.config_file, resume=args.resume, num_streams=args.streams)
+    if args.resume:
+        logf = open(recon.log_file, 'a')
+    else:
+        logf = open(recon.log_file, 'w')
+        logf.write('Iter  time(s)  change\n')
+        logf.flush()
     avgtime = 0.
     numavg = 0
 
-    for i in range(args.num_iter):
+    for i in np.arange(args.num_iter) + recon.iternum:
         m0 = cp.array(recon.model)
         stime = time.time()
-        recon.run_iteration(i+1)
+        recon.run_iteration()
         etime = time.time()
-        sys.stderr.write('\r%d/%d (%f s)\n'% (i+1, args.num_iter, etime-stime))
+        sys.stderr.write('\r%d/%d (%f s)\n'% (i, args.num_iter, etime-stime))
         norm = float(cp.linalg.norm(cp.array(recon.model.ravel()) - m0.ravel()))
-        logf.write('%-6d%-.2e %e\n' % (i+1, etime-stime, norm))
+        logf.write('%-6d%-.2e %e\n' % (i, etime-stime, norm))
         print('Change from last iteration: ', norm)
         logf.flush()
         if i > 0:
