@@ -172,7 +172,8 @@ class Estimator():
 
         if dnum_rot is None:
             dnum_rot = 5 if order == 1 else 1
-        prob = cp.zeros((states['shift_x'].size, dnum_rot))
+            dnum_rot = min(num_rot, dnum_rot)
+        prob = cp.zeros((states_dict['shift_x'].size, dnum_rot))
         for d in range(self.dset.num_data):
             dsx, dsy, ddia = self._get_dstates(states_dict, params, d, order=order)
             if order == 1:
@@ -201,4 +202,6 @@ class Estimator():
         sys.stderr.write('\n')
         print('Estimated params: %.3f s' % (time.time()-stime))
 
+        for k in ['shift_x', 'shift_y', 'sphere_dia', 'angles']:
+            dparams[k] = cp.array(np.array(dparams[k]))
         return dparams
