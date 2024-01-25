@@ -43,8 +43,9 @@ class Recon():
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')
         self.num_pattern = config.getint('emc', 'num_pattern', fallback=4)
-        self.output_folder = op.join(start_dir, config.get('emc', 'output_folder'))
-        self.log_file = op.join(start_dir, config.get('emc', 'log_file'))
+        self.output_folder = op.join(start_dir, config.get('emc', 'output_folder', fallback='data/'))
+        self.log_file = op.join(start_dir, config.get('emc', 'log_file',
+                                                      fallback=op.join(self.output_folder, 'EMC.log')))
 
         self.need_scaling = config.getboolean('emc', 'need_scaling', fallback=False)
 
@@ -168,7 +169,7 @@ def main():
     cp.cuda.Device(args.device).use()
 
     recon = Recon(args.config_file, num_streams=args.streams)
-    logf = open(op.join(recon.output_folder, 'EMC.log'), 'w')
+    logf = open(recon.log_file, 'w')
     logf.write('Iter  time(s)  change\n')
     logf.flush()
     avgtime = 0.
