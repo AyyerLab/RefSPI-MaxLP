@@ -158,7 +158,7 @@ class Estimator():
         ddia = params['sphere_dia'][d] + (gdia-gdia.mean()) / gdia.size**order
         return cp.meshgrid(dsx, dsy, ddia, indexing='ij')
 
-    def estimate_local(self, model, scales, states, num_rot, params, order=1, dnum_rot=None):
+    def estimate_local(self, model, scales, states_dict, num_rot, params, order=1, dnum_rot=None):
         '''Estimate latent parameters with a local search
 
         For this search a different set of parameters are examined for each frame
@@ -174,7 +174,7 @@ class Estimator():
             dnum_rot = 5 if order == 1 else 1
         prob = cp.zeros((states['shift_x'].size, dnum_rot))
         for d in range(self.dset.num_data):
-            dsx, dsy, ddia = self._get_dstates(states, params, d, order=order)
+            dsx, dsy, ddia = self._get_dstates(states_dict, params, d, order=order)
             if order == 1:
                 dang = params['angles'][d] + cp.linspace(-1,1,5) * 2*cp.pi/num_rot
             else:
