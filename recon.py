@@ -26,11 +26,12 @@ class Recon():
     '''
     def __init__(self, config_file, resume=False, num_streams=4):
         self.num_streams = num_streams
+        self.params = None
 
         config = configparser.ConfigParser()
         config.read(config_file)
         config_dir = op.dirname(config_file)
-        self._parse_params(config, config_dir)
+        self._parse_recon_params(config, config_dir)
         self._parse_detector(config, config_dir)
         self._parse_data(config, config_dir)
         self._generate_states(config)
@@ -40,7 +41,7 @@ class Recon():
         self.phaser = MaxLPhaser(self.dset, self.det, self.size, num_pattern=self.num_pattern)
         self.phaser.get_sampled_mask(cp.arange(self.num_rot)*2*np.pi/self.num_rot)
 
-    def _parse_params(self, config, start_dir):
+    def _parse_recon_params(self, config, start_dir):
         self.num_modes = config.getint('emc', 'num_modes', fallback=1)
         self.num_rot = config.getint('emc', 'num_rot')
         self.num_pattern = config.getint('emc', 'num_pattern', fallback=4)
@@ -108,15 +109,24 @@ class Recon():
 
         return last_iter + 1
 
-    def run_iteration(self, num_phaser_iter=10):
+    def run_iteration(self, curr_params=None, num_phaser_iter=10):
         '''Run one iteration of reconstruction algorithm
 
         Args:
-            iternum (int, optional): If specified, output is tagged with iteration number
-        Current guess is assumed to be in self.model, which is updated. If scaling is included,
+            curr_params (dict, optional) - Dict of current estimate of latent params. If given
+                        a local search is performed. If not supplied, a global search is done.
+            num_phaser_iter (int, optional) - Number of iterations of MaxLP, default=10
+
+        Current model is assumed to be in self.model, which is updated. If scaling is included,
         the scale factors are in self.scales.
         '''
-        self.params = self.estimator.estimate_global(self.model, self.scales, self.states, self.num_rot)
+        if curr_params is None:
+            self.params = self.estimator.estimate_global(self.model, self.scales,
+                                                         self.states, self.num_rot)
+        else:
+            self.params = self.estimator.estimate_local(self.model, self.scales,
+                                                        self.states, self.num_rot,
+                                                        curr_params, order=1)
         self.model = self.phaser.run_phaser(self.model, self.params, num_iter=num_phaser_iter).get()
         self.save_output(self.model, self.params)
         self.iternum += 1
@@ -184,6 +194,8 @@ def main():
                         help='Device index (default=0)')
     parser.add_argument('-r', '--resume', action='store_true',
                         help='Resume previous reconstruction')
+    parser.add_argument('-l', '--local', action='store_true',
+                        help='Do local search (need -r or start_model_file)')
     args = parser.parse_args()
 
     print('Running on device', args.device)
@@ -202,7 +214,12 @@ def main():
     for i in np.arange(args.num_iter) + recon.iternum:
         m0 = cp.array(recon.model)
         stime = time.time()
-        recon.run_iteration()
+        if args.local:
+            if recon.params is not None:
+                print('Performing local search')
+            recon.run_iteration(curr_params=recon.params)
+        else:
+            recon.run_iteration()
         etime = time.time()
         sys.stderr.write('\r%d/%d (%f s)\n'% (i, args.num_iter, etime-stime))
         norm = float(cp.linalg.norm(cp.array(recon.model.ravel()) - m0.ravel()))
