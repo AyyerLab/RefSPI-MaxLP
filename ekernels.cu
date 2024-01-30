@@ -36,7 +36,7 @@ complex<double> rampsphere(const double qx, const double qy,
     double s = sqrt(qx*qx + qy*qy) * CUDART_PI * diameter ;
     if (s == 0.)
         s = 1.e-5 ;
-    complex<double> sphere = complex<double>((sin(s) - s*cos(s)) / (s*s*s), 0) ;
+    complex<double> sphere = complex<double>(pow(diameter, 3.) * (sin(s) - s*cos(s)) / (s*s*s), 0) ;
 
     return ramp * sphere ;
 }
@@ -108,9 +108,11 @@ void slice_gen_holo(const complex<double> *model,
 }
 
 __global__
-void calc_prob_all(const double *lview, const uint8_t *mask, const long long ndata, const int *ones,
-                   const int *multi, const long long *o_acc, const long long *m_acc, const int *p_o,
-                   const int *p_m, const int *c_m, const double init, const double *scales,
+void calc_prob_all(const double *lview, const uint8_t *mask,
+                   const long long ndata, const int *ones, const int *multi,
+                   const long long *o_acc, const long long *m_acc,
+                   const int *p_o, const int *p_m, const int *c_m,
+                   const double init, const double *scales,
                    const long long r, long long *rmax, double *maxprob_r) {
     long long d, t ;
     int pixel ;
@@ -141,7 +143,7 @@ void get_prob_frame(const complex<double> *model, const long long size,
                     const int *p_o, const int *p_m, const int *c_m, const long long n_o, const long long n_m,
                     const double *sx, const double *sy, const double *dia, const long long nparams,
                     const double *angles, const long long nangs,
-                    const double *cx, const double *cy, const long long npix,
+                    const double *cx, const double *cy, const uint8_t *mask, const long long npix,
                     const double rescale, double *prob) {
     long long r = blockDim.x * blockIdx.x + threadIdx.x ;
     long long a = blockDim.y * blockIdx.y + threadIdx.y ;
@@ -159,6 +161,8 @@ void get_prob_frame(const complex<double> *model, const long long size,
     int t_o = 0, t_m = 0 ;
 
     for (pix = 0 ; pix < npix ; ++pix) {
+        if (mask[pix] > 0)
+            continue ;
         tx = cx[pix] * ac - cy[pix] * as ;
         ty = cx[pix] * as + cy[pix] * ac ;
 
@@ -176,6 +180,32 @@ void get_prob_frame(const complex<double> *model, const long long size,
         else if (p_m[t_m] == pix) {
             prob[r*nangs + a] += c_m[t_m] * log(intens) ;
             ++t_m ;
+        }
+    }
+}
+
+__global__
+void calc_local_prob_all(const complex<double> *model, const long long size,
+                         const long long ndata, const int *ones, const int *multi,
+                         const long long *o_acc, const long long *m_acc,
+                         const int *p_o, const int *p_m, const int *c_m,
+                         const double *cx, const double *cy, const long long npix,
+                         const double *rvalues, const double *rspreads, const long long *num_rsamples,
+                         const double *angles, const double ang_spread, const long long num_angs,
+                         long long *rmax, double *maxprob_r) {
+    long long d, t ;
+    d = blockDim.x * blockIdx.x + threadIdx.x ;
+    if (d >= ndata)
+        return ;
+    
+    int r, a, tot_num_rsamples = 1 ;
+    for (r = 0 ; r < 3 ; ++r)
+        tot_num_rsamples *= num_rsamples[r] ;
+
+    for (r = 0 ; r < tot_num_rsamples ; ++r) {
+        // Generate rampsphere
+
+        for (a = 0 ; a < num_angs ; ++a) {
         }
     }
 }
