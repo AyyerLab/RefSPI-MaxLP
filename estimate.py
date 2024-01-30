@@ -40,19 +40,24 @@ class Estimator():
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
         self.k_get_prob_frame = kernels.get_function('get_prob_frame')
 
+    def _get_states(self, states_dict, num_rot):
+        self.shiftx = states_dict['shift_x']
+        self.shifty = states_dict['shift_y']
+        self.sphere_dia = states_dict['sphere_dia']
+        self.num_states = states_dict['num_states']
+        self.tot_num_states = self.shiftx.size
+
+        self.num_rot = num_rot
+
+        self.msums = cp.empty((self.tot_num_states, self.num_rot))
+
     def estimate_global(self, model, scales, states_dict, num_rot):
         '''Estimate latent parameters with a global search
 
         For this search, the same parameters are examined for all frames
         '''
 
-        self.shiftx = states_dict['shift_x']
-        self.shifty = states_dict['shift_y']
-        self.sphere_dia = states_dict['sphere_dia']
-        self.num_states = states_dict['num_states']
-        self.tot_num_states = self.shiftx.size
-        self.num_rot = num_rot
-        self.msums = cp.empty((self.tot_num_states, self.num_rot))
+        self._get_states(states_dict, num_rot)
 
         #mp = cp.get_default_memory_pool()
         #print('Mem usage: %.2f MB / %.2f MB' % (mp.total_bytes()/1024**2, self.mem_size/1024**2))
@@ -70,13 +75,11 @@ class Estimator():
         sum_detview = cp.zeros_like(detview)
 
         for r in range(self.tot_num_states):
-            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
-                     self.sphere_dia.ravel()[r], 1., 1., self.size, modelview))
+            self._slice_gen_holo(dmodel, self.shiftx.ravel()[r],
+                                 self.shiftx.ravel()[r], self.sphere_dia.ravel()[r],
+                                 output=modelview)
             for j in range(self.num_rot):
-                self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (modelview, self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
-                         self.size, self.det.num_pix, self.dset.bg, 0, detview))
+                self._slice_gen(modelview, j*2*np.pi/self.num_rot, detview, do_log=False)
                 sum_detview += detview
                 self.msums[r,j] = detview.sum()
         sum_detview /= self.tot_num_states * self.num_rot
@@ -97,21 +100,13 @@ class Estimator():
             snum = r % self.num_streams
             self.stream_list[snum].use()
 
-            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, self.shiftx.ravel()[r], self.shifty.ravel()[r],
-                     self.sphere_dia.ravel()[r], 1., 1., self.size, model_views[snum]))
+            self._slice_gen_holo(dmodel, self.shiftx.ravel()[r],
+                                 self.shiftx.ravel()[r], self.sphere_dia.ravel()[r],
+                                 output=model_views[snum])
 
             for j in range(self.num_rot):
-                self.k_slice_gen((self.bsize_pixel,), (32,),
-                        (model_views[snum], self.cx, self.cy, j*2*np.pi/self.num_rot, 1.,
-                         self.size, self.det.num_pix, self.dset.bg, 1, det_views[snum]))
-                self.k_calc_prob_all((self.bsize_data,), (32,),
-                        (det_views[snum], self.probmask, self.dset.num_data,
-                         self.dset.ones, self.dset.multi,
-                         self.dset.ones_accum, self.dset.multi_accum,
-                         self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
-                         -float(self.msums[r,j]*vscale), scales,
-                         r*self.num_rot + j, self.rmax, self.maxprob))
+                self._slice_gen(model_views[snum], j*2*np.pi/self.num_rot, det_views[snum], do_log=True)
+                self._calc_prob_all(det_views[snum], -float(self.msums[r,j]*vscale), scales, r*self.num_rot + j)
 
             sys.stderr.write('\r%d/%d   ' % (r+1, self.tot_num_states))
         [stream.synchronize() for stream in self.stream_list]
@@ -136,12 +131,9 @@ class Estimator():
         sum_detview = cp.zeros_like(detview)
 
         for d in range(self.dset.num_data):
-            self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
-                    (dmodel, params['shift_x'][d].item(), params['shift_y'][d].item(),
-                     params['sphere_dia'][d].item(), 1., 1., self.size, modelview))
-            self.k_slice_gen((self.bsize_pixel,), (32,),
-                    (modelview, self.cx, self.cy, params['angles'][d], 1.,
-                     self.size, self.det.num_pix, self.dset.bg, 0, detview))
+            self._slice_gen_holo(dmodel, params['shift_x'][d].item(), params['shift_y'][d].item(),
+                     params['sphere_dia'][d].item(), modelview))
+            self._slice_gen(modelview, params['angles'][d], detview, do_log=False)
             sum_detview += detview
         sum_detview /= self.dset.num_data
         vscale = self.powder.sum() / sum_detview.sum()
@@ -182,15 +174,17 @@ class Estimator():
                 dang = cp.array([params['angles'][d]])
             prob[:] = 0
 
+            o_acc = self.dset.ones_accum[d]
+            m_acc = self.dset.multi_accum[d]
             self.k_get_prob_frame(prob.shape, (1,1),
                                  (dmodel, self.size,
-                                  self.dset.place_ones[self.dset.ones_accum[d]:],
-                                  self.dset.place_multi[self.dset.multi_accum[d]:],
-                                  self.dset.count_multi[self.dset.multi_accum[d]:],
+                                  self.dset.place_ones[o_acc:],
+                                  self.dset.place_multi[m_acc:],
+                                  self.dset.count_multi[m_acc:],
                                   int(self.dset.ones[d]), int(self.dset.multi[d]),
                                   dsx, dsy, ddia, prob.shape[0],
                                   dang, prob.shape[1],
-                                  self.cx, self.cy, self.det.num_pix,
+                                  self.cx, self.cy, self.probmask, self.det.num_pix,
                                   drescale, prob))
 
             ind, aind = cp.unravel_index(prob.argmax(), prob.shape)
@@ -205,3 +199,27 @@ class Estimator():
         for k in ['shift_x', 'shift_y', 'sphere_dia', 'angles']:
             dparams[k] = cp.array(np.array(dparams[k]))
         return dparams
+
+    def _slice_gen_holo(self, dmodel, sx, sy, dia, output=None):
+        if output is None:
+            output = cp.zeros((self.size, self.size))
+        self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
+                (dmodel, sx, sy, dia, 1., 1., self.size, output))
+
+    def _slice_gen(self, modelview, angle, output=None, do_log=False):
+        if output is None:
+            output = cp.zeros(self.det.num_pix)
+        logval = int(do_log)
+        self.k_slice_gen((self.bsize_pixel,), (32,),
+                (modelview, self.cx, self.cy, angle, 1.,
+                 self.size, self.det.num_pix, self.dset.bg, do_log, output))
+
+    def _calc_prob_all(self, view, init, scales, index):
+        self.k_calc_prob_all((self.bsize_data,), (32,),
+                (view, self.probmask, self.dset.num_data,
+                 self.dset.ones, self.dset.multi,
+                 self.dset.ones_accum, self.dset.multi_accum,
+                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                 init, scales,
+                 index, self.rmax, self.maxprob))
+
