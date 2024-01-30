@@ -49,7 +49,7 @@ class DataGenerator():
         if self.fluence not in ['constant', 'gamma']:
             raise ValueError('make_data:fluence needs to be either constant (default) or gamma')
 
-        with open(op.join(op.dirname(__file__), 'kernels.cu'), 'r') as f:
+        with open(op.join(op.dirname(__file__), 'ekernels.cu'), 'r') as f:
             kernels = cp.RawModule(code=f.read())
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         self.k_slice_gen = kernels.get_function('slice_gen')
@@ -145,6 +145,7 @@ class DataGenerator():
                                    self.size, view))
             rescale += view.sum()
         rescale = self.mean_count / rescale * num_data_rescale
+        print('rescale =', rescale)
 
         with h5py.File(op.splitext(self.out_photons_file)[0]+'_meta.h5', 'w') as h5f:
             h5f['scale'] = scale
