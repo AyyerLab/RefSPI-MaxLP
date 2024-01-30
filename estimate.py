@@ -132,7 +132,7 @@ class Estimator():
 
         for d in range(self.dset.num_data):
             self._slice_gen_holo(dmodel, params['shift_x'][d].item(), params['shift_y'][d].item(),
-                     params['sphere_dia'][d].item(), modelview))
+                     params['sphere_dia'][d].item(), modelview)
             self._slice_gen(modelview, params['angles'][d], detview, do_log=False)
             sum_detview += detview
         sum_detview /= self.dset.num_data
