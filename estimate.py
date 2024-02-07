@@ -77,9 +77,7 @@ class Estimator():
         sum_detview = cp.zeros_like(detview)
 
         for r in range(self.tot_num_states):
-            self._slice_gen_holo(dmodel, self.shiftx.ravel()[r],
-                                 self.shiftx.ravel()[r], self.sphere_dia.ravel()[r],
-                                 output=modelview)
+            self._slice_gen_holo(dmodel, r, output=modelview)
             for j in range(self.num_rot):
                 self._slice_gen(modelview, j*2*np.pi/self.num_rot, detview, do_log=False)
                 sum_detview += detview * self.state_weights.ravel()[r]
@@ -102,9 +100,7 @@ class Estimator():
             snum = r % self.num_streams
             self.stream_list[snum].use()
 
-            self._slice_gen_holo(dmodel, self.shiftx.ravel()[r],
-                                 self.shiftx.ravel()[r], self.sphere_dia.ravel()[r],
-                                 output=model_views[snum])
+            self._slice_gen_holo(dmodel, r, output=model_views[snum])
 
             for j in range(self.num_rot):
                 self._slice_gen(model_views[snum], j*2*np.pi/self.num_rot, det_views[snum], do_log=True)
@@ -180,9 +176,13 @@ class Estimator():
 
         return dparams
 
-    def _slice_gen_holo(self, dmodel, sx, sy, dia, output=None):
+    def _slice_gen_holo(self, dmodel, state_ind, output=None):
         if output is None:
             output = cp.zeros((self.size, self.size))
+        sx = self.shiftx.ravel()[state_ind]
+        sy = self.shifty.ravel()[state_ind]
+        dia = self.sphere_dia.ravel()[state_ind]
+
         self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                 (dmodel, sx, sy, dia, 1., 1., self.size, output))
 
