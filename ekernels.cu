@@ -185,27 +185,74 @@ void get_prob_frame(const complex<double> *model, const long long size,
 }
 
 __global__
-void calc_local_prob_all(const complex<double> *model, const long long size,
+void calc_local_prob_all(const complex<double> *model, const long long size, const double rescale,
                          const long long ndata, const int *ones, const int *multi,
                          const long long *o_acc, const long long *m_acc,
                          const int *p_o, const int *p_m, const int *c_m,
-                         const double *cx, const double *cy, const long long npix,
-                         const double *rvalues, const double *rspreads, const long long *num_rsamples,
-                         const double *angles, const double ang_spread, const long long num_angs,
-                         long long *rmax, double *maxprob_r) {
-    long long d, t ;
+                         const double *cx, const double *cy, const uint8_t *mask, const long long npix,
+                         const double *rvalues, const double *rsteps, const long long *num_rsamples,
+                         const double *angles, const double ang_step, const long long num_angs,
+                         long long *rmax, double *maxprob) {
+    long long d ;
     d = blockDim.x * blockIdx.x + threadIdx.x ;
     if (d >= ndata)
         return ;
     
-    int r, a, tot_num_rsamples = 1 ;
+    long long r, index, a, pix ;
+	double sx, sy, dia, ang ;
+	double tx, ty, ac, as ;
+	complex<double> fval ;
+	double intens, myprob ;
+	long long t_o, t_m ;
+
+	long long tot_num_rsamples = 1 ;
     for (r = 0 ; r < 3 ; ++r)
         tot_num_rsamples *= num_rsamples[r] ;
 
     for (r = 0 ; r < tot_num_rsamples ; ++r) {
-        // Generate rampsphere
-
+		index = r / (num_rsamples[1] * num_rsamples[2]) - num_rsamples[0] / 2 ;
+		sx = rvalues[d*3 + 0] + rsteps[0] * index ;
+		index = (r / num_rsamples[2]) % num_rsamples[1] - num_rsamples[1] / 2 ;
+		sy = rvalues[d*3 + 1] + rsteps[1] * index ;
+		index = r % num_rsamples[2] - num_rsamples[2] / 2 ;
+		dia = rvalues[d*3 + 2] + rsteps[2] * index ;
+		
         for (a = 0 ; a < num_angs ; ++a) {
+			ang = angles[d] + (a - a/2) * ang_step ;
+			ac = cos(ang) ;
+			as = sin(ang) ;
+
+			myprob = 0. ;
+	        t_o = o_acc[d] ;
+			t_m = m_acc[d] ;
+
+			for (pix = 0 ; pix < npix ; ++pix) {
+				if (mask[pix] > 0)
+					continue ;
+
+				tx = cx[pix] * ac - cy[pix] * as ;
+				ty = cx[pix] * as + cy[pix] * ac ;
+
+				fval = rampsphere(tx/size, ty/size, sx, sy, dia) +
+					   cinterp2d(model, size, cx[pix], cy[pix], ang) ;
+				intens = pow(abs(fval), 2.) ;
+				myprob -= rescale * intens ;
+
+				// Assuming sorted and non-overlapping p_o and p_m
+				if (p_o[t_o] == pix) {
+					myprob += log(intens) ;
+					++t_o ;
+				}
+				else if (p_m[t_m] == pix) {
+					myprob += c_m[t_m] * log(intens) ;
+					++t_m ;
+				}
+			}
+
+			if (myprob > maxprob[d]) {
+				maxprob[d] = myprob ;
+				rmax[d] = r*num_angs + a ;
+			}
         }
     }
 }
