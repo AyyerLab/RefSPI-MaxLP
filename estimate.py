@@ -46,6 +46,7 @@ class Estimator():
         self.shifty = states_dict['shift_y']
         self.sphere_dia = states_dict['sphere_dia']
         self.num_states = states_dict['num_states']
+        self.state_weights = states_dict['weight']
         self.tot_num_states = self.shiftx.size
 
         self.num_rot = num_rot
@@ -81,12 +82,12 @@ class Estimator():
                                  output=modelview)
             for j in range(self.num_rot):
                 self._slice_gen(modelview, j*2*np.pi/self.num_rot, detview, do_log=False)
-                sum_detview += detview
+                sum_detview += detview * self.state_weights.ravel()[r]
                 self.msums[r,j] = detview.sum()
-        sum_detview /= self.tot_num_states * self.num_rot
+        sum_detview /= self.num_rot # weights array sums to 1
         vscale = self.powder.sum() / sum_detview.sum()
 
-        return vscale
+        return float(vscale)
 
     def _calculate_prob(self, dmodel, scales):
         vscale = self._calculate_rescale(dmodel)
