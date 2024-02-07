@@ -88,10 +88,10 @@ class Recon():
         self.states['weight'] = np.ones_like(self.states['shift_x'])
         if sx_w[1] > 0:
             print('Incorporation Gaussian weighting for X-shift with params:', sx_w)
-            self.states['weight'] *= np.exp(-(self.states['shiftx']-sx_w[0])**2/2/sx_w[1]**2)
+            self.states['weight'] *= np.exp(-(self.states['shift_x']-sx_w[0])**2/2/sx_w[1]**2)
         if sy_w[1] > 0:
             print('Incorporation Gaussian weighting for Y-shift with params:', sy_w)
-            self.states['weight'] *= np.exp(-(self.states['shifty']-sy_w[0])**2/2/sy_w[1]**2)
+            self.states['weight'] *= np.exp(-(self.states['shift_y']-sy_w[0])**2/2/sy_w[1]**2)
         if dia_w[1] > 0:
             print('Incorporation Gaussian weighting for sphere diameter with params:', dia_w)
             self.states['weight'] *= np.exp(-(self.states['sphere_dia']-dia_w[0])**2/2/dia_w[1]**2)
