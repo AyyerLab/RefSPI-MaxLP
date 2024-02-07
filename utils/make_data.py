@@ -91,6 +91,7 @@ class DataGenerator():
                         break
                 diskrad = cp.sqrt((x - cen0)**2 + (y - cen1)**2)
                 mask[diskrad <= rad] += 1. - (diskrad[diskrad <= rad] / rad)**2
+        mask *= 0.5
 
         if bg:
             self.bgmask_sum = float(mask.sum())
@@ -124,18 +125,22 @@ class DataGenerator():
         else:
             scale = np.ones(self.num_data, dtype='f8')
 
+        cx = cp.array(self.det.cx)
+        cy = cp.array(self.det.cy)
+
         shifts = np.random.randn(self.num_data, 2)*self.shift_sigma
         diameters = np.random.randn(self.num_data)*self.dia_params[1] + self.dia_params[0]
         if self.random_angles:
             angles = np.random.rand(self.num_data) * 2. * np.pi
         else:
             angles = np.zeros(self.num_data)
-        #rel_scales = diameters**3 * 1000. / 7**3
-        #scale *= rel_scales/1.e3
         model = cp.fft.fftshift(cp.fft.fftn(cp.fft.ifftshift(self.object)))
 
         view = cp.zeros(self.size**2, dtype='f8')
+        rview = cp.zeros(self.det.num_pix, dtype='f8')
         bsize_model = int(np.ceil(self.size/32.))
+        bsize_pixel = int(np.ceil(self.det.num_pix/32.))
+
         rescale = 0.
         num_data_rescale = min(100, self.num_data)
         for i in range(num_data_rescale):
@@ -143,7 +148,10 @@ class DataGenerator():
                                   (model, shifts[i,0], shifts[i,1],
                                    diameters[i], self.rel_scale, scale[i],
                                    self.size, view))
-            rescale += view.sum()
+            self.k_slice_gen((bsize_pixel,), (32,),
+                             (view, cx, cy, angles[i], 1., self.size,
+                              self.det.num_pix, self.bgmask, 0, rview))
+            rescale += rview.sum()
         rescale = self.mean_count / rescale * num_data_rescale
         print('rescale =', rescale)
 
@@ -157,16 +165,7 @@ class DataGenerator():
             if self.bgmask_sum > 0:
                 h5f['bg'] = self.bgmask.get()
 
-        rview = cp.zeros(self.det.num_pix, dtype='f8')
-        zmask = cp.zeros_like(view, dtype='f8')
-
-        bsize_pixel = int(np.ceil(self.det.num_pix/32.))
         wemc = writeemc.EMCWriter(self.out_photons_file, self.det.num_pix, hdf5=False)
-
-        qx = (x - mcen) 
-        qy = (y - mcen)
-        cx = cp.array(self.det.cx)
-        cy = cp.array(self.det.cy)
 
         stime = time.time()
         for i in range(self.num_data):
@@ -203,6 +202,7 @@ def main():
                         help='Device number (default: 0)', type=int, default=0)
     args = parser.parse_args()
 
+    cp.cuda.Device(args.device).use()
     datagen = DataGenerator(args.config_file)
     if not args.data_only:
         datagen.make_obj()
