@@ -240,10 +240,10 @@ def main():
         else:
             recon.run_iteration()
         etime = time.time()
-        sys.stderr.write('%d/%d (%f s)\n%s\n'% (i, args.num_iter+start_iternum-1, etime-stime, '-'*80))
         norm = float(cp.linalg.norm(cp.array(recon.model.ravel()) - m0.ravel()))
-        logf.write('%-6d%-.2e %e\n' % (i, etime-stime, norm))
         print('Change from last iteration: ', norm)
+        sys.stderr.write('%d/%d (%f s)\n%s\n'% (i, args.num_iter+start_iternum-1, etime-stime, '-'*80))
+        logf.write('%-6d%-.2e %e\n' % (i, etime-stime, norm))
         logf.flush()
         if i > 0:
             avgtime += etime-stime
