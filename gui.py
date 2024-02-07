@@ -34,6 +34,7 @@ class GUI(QtWidgets.QMainWindow):
         vbox.addWidget(self.plot_widget, stretch=1)
         self.param_type = QtWidgets.QComboBox()
         self.param_type.addItems(['angles', 'shifts', 'diameters'])
+        self.param_type.setCurrentIndex(2)
         self.param_type.currentIndexChanged.connect(self._update)
         vbox.addWidget(self.param_type)
 
@@ -83,7 +84,7 @@ class GUI(QtWidgets.QMainWindow):
             data = self.model
         curr_range = self.main_imview.getHistogramWidget().getLevels()
         if self.view_mag.isChecked():
-            rgbdata = np.abs(data)
+            rgbdata = np.abs(data)**0.4
         else:
             hsvdata = np.zeros((data.shape[0], data.shape[1], 3), dtype=np.float64)
             hsvdata[..., 0] = np.clip(np.angle(data), -np.pi, np.pi) / (2*np.pi) + 0.5
