@@ -79,7 +79,7 @@ class Recon():
                 np.linspace(dia[0], dia[1], int(dia[2])),
                 indexing='ij')
 
-        self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i4')
+        self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i8')
         print(int(self.states['num_states'].prod()), 'sampled states')
 
     def _init_model(self, config, start_dir, resume=False):
@@ -142,6 +142,7 @@ class Recon():
                 fptr['scale'] = scales
 
     def _random_model(self):
+        print('Initializing random model')
         rmodel = np.zeros((self.size,)*2)
         #self.model = np.random.random(self.size**2) + 1j*np.random.random(self.size**2)
         #self.model *= 1e-3 # To match scale of sphere model
@@ -156,13 +157,15 @@ class Recon():
         rmodel -= rmodel[:10,:10].mean()
         self.model = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(rmodel)))
         #self.model *= 8e-9 * (np.abs(self.model)**2).mean()
-        self.model *= 1e-7 * (np.abs(self.model)**2).mean()
+        self.model *= 2.5e-4 * (np.abs(self.model)**2).mean()
         if self.need_scaling:
             self.scales = self.dset.counts / self.dset.mean_count
         else:
             self.scales = cp.ones(int(self.dset.num_data), dtype='f8')
 
     def _load_model(self, model_fname):
+        print('Loading model from', model_fname)
+
         with h5py.File(model_fname, 'r') as f:
             if 'model' in f:
                 names = ['model', 'angles', 'shifts', 'diameters']
@@ -210,8 +213,9 @@ def main():
         logf.flush()
     avgtime = 0.
     numavg = 0
+    start_iternum = recon.iternum
 
-    for i in np.arange(args.num_iter) + recon.iternum:
+    for i in np.arange(args.num_iter) + start_iternum:
         m0 = cp.array(recon.model)
         stime = time.time()
         if args.local:
@@ -221,7 +225,7 @@ def main():
         else:
             recon.run_iteration()
         etime = time.time()
-        sys.stderr.write('\r%d/%d (%f s)\n'% (i, args.num_iter, etime-stime))
+        sys.stderr.write('%d/%d (%f s)\n%s\n'% (i, args.num_iter+start_iternum-1, etime-stime, '-'*80))
         norm = float(cp.linalg.norm(cp.array(recon.model.ravel()) - m0.ravel()))
         logf.write('%-6d%-.2e %e\n' % (i, etime-stime, norm))
         print('Change from last iteration: ', norm)
@@ -230,7 +234,7 @@ def main():
             avgtime += etime-stime
             numavg += 1
     if numavg > 0:
-        print('\n%.4e s/iteration on average' % (avgtime / numavg))
+        print('\n%f s/iteration on average' % (avgtime / numavg))
     logf.close()
 
 if __name__ == '__main__':
