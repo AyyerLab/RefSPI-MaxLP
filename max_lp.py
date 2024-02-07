@@ -219,7 +219,7 @@ class MaxLPhaser():
     def get_fref_d(self, d_vals, v):
         '''Get predicted intensities for frame list d_vals at model voxel v'''
         sval = cp.pi * self.mrad[v] * self.diams[d_vals] / self.size
-        fref = (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
+        fref = self.diams[d_vals]**3 * (cp.sin(sval) - sval*cp.cos(sval)) / sval**3
         ramp = cp.exp(1j*2*cp.pi*(self.mx[v]*self.shifts[d_vals, 0] +
                                   self.my[v]*self.shifts[d_vals, 1]) / self.size)
         return fref*ramp
