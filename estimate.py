@@ -39,6 +39,7 @@ class Estimator():
         self.k_slice_gen_holo = kernels.get_function('slice_gen_holo')
         self.k_calc_prob_all = kernels.get_function('calc_prob_all')
         self.k_get_prob_frame = kernels.get_function('get_prob_frame')
+        self.k_calc_local_prob_all = kernels.get_function('calc_local_prob_all')
 
     def _get_states(self, states_dict, num_rot):
         self.shiftx = states_dict['shift_x']
@@ -138,17 +139,7 @@ class Estimator():
         sum_detview /= self.dset.num_data
         vscale = self.powder.sum() / sum_detview.sum()
 
-        return vscale
-
-    @staticmethod
-    def _get_dstates(gstates, params, d, order=1):
-        gsx = cp.array(gstates['shift_x'][:,0,0])
-        dsx = params['shift_x'][d] + (gsx-gsx.mean()) / gsx.size**order
-        gsy = cp.array(gstates['shift_y'][0,:,0])
-        dsy = params['shift_y'][d] + (gsy-gsy.mean()) / gsy.size**order
-        gdia = cp.array(gstates['sphere_dia'][0,0,:])
-        ddia = params['sphere_dia'][d] + (gdia-gdia.mean()) / gdia.size**order
-        return cp.meshgrid(dsx, dsy, ddia, indexing='ij')
+        return float(vscale)
 
     def estimate_local(self, model, scales, states_dict, num_rot, params, order=1, dnum_rot=None):
         '''Estimate latent parameters with a local search
@@ -158,46 +149,34 @@ class Estimator():
         stime = time.time()
         dmodel = cp.array(model)
         drescale = self._calculate_rescale_local(dmodel, params)
-        dparams = {'shift_x':[], 'shift_y':[],
-                   'sphere_dia':[], 'angles':[],
-                   'frame_rescale': drescale}
+        print('Using rescale =', drescale)
+        dparams = {'frame_rescale': drescale}
 
         if dnum_rot is None:
             dnum_rot = 5 if order == 1 else 1
             dnum_rot = min(num_rot, dnum_rot)
-        prob = cp.zeros((states_dict['shift_x'].size, dnum_rot))
-        for d in range(self.dset.num_data):
-            dsx, dsy, ddia = self._get_dstates(states_dict, params, d, order=order)
-            if order == 1:
-                dang = params['angles'][d] + cp.linspace(-1,1,5) * 2*cp.pi/num_rot
-            else:
-                dang = cp.array([params['angles'][d]])
-            prob[:] = 0
+        rsteps = cp.zeros(3)
+        rsteps[0] = 0 if states_dict['num_states'][0] == 1 else np.diff(states_dict['shift_x'][:2,0,0])[0] / states_dict['shift_x'].shape[0]**order
+        rsteps[1] = 0 if states_dict['num_states'][1] == 1 else np.diff(states_dict['shift_y'][0,:2,0])[0] / states_dict['shift_y'].shape[1]**order
+        rsteps[2] = 0 if states_dict['num_states'][2] == 1 else np.diff(states_dict['sphere_dia'][0,0,:2])[0] / states_dict['sphere_dia'].shape[2]**order
+        ang_step = 2*cp.pi/num_rot/dnum_rot
+        self.num_states = states_dict['num_states']
+        self.maxprob[:] = -cp.finfo('f8').max
 
-            o_acc = self.dset.ones_accum[d]
-            m_acc = self.dset.multi_accum[d]
-            self.k_get_prob_frame(prob.shape, (1,1),
-                                 (dmodel, self.size,
-                                  self.dset.place_ones[o_acc:],
-                                  self.dset.place_multi[m_acc:],
-                                  self.dset.count_multi[m_acc:],
-                                  int(self.dset.ones[d]), int(self.dset.multi[d]),
-                                  dsx, dsy, ddia, prob.shape[0],
-                                  dang, prob.shape[1],
-                                  self.cx, self.cy, self.probmask, self.det.num_pix,
-                                  drescale, prob))
+        rsteps = cp.array([0.,0.,0.0363636364])
+        self.num_states = cp.array([1,1,11])
+        ang_step = 0.
+        dnum_rot = 1
 
-            ind, aind = cp.unravel_index(prob.argmax(), prob.shape)
-            dparams['shift_x'].append(float(dsx.ravel()[ind]))
-            dparams['shift_y'].append(float(dsy.ravel()[ind]))
-            dparams['sphere_dia'].append(float(ddia.ravel()[ind]))
-            dparams['angles'].append(float(dang[aind]))
-            sys.stderr.write('\rFrame %d/%d'%(d+1, self.dset.num_data))
-        sys.stderr.write('\n')
+        self._calc_local_prob_all(dmodel, params, drescale, rsteps, cp.array(self.num_states), ang_step, dnum_rot)
+
+        sx_ind, sy_ind, dia_ind, ang_ind = cp.unravel_index(self.rmax, tuple(self.num_states) + (dnum_rot,))
+        dparams['shift_x'] = cp.array(params['shift_x']) + rsteps[0]*(sx_ind-self.num_states[0]//2)
+        dparams['shift_y'] = cp.array(params['shift_y']) + rsteps[1]*(sy_ind-self.num_states[1]//2)
+        dparams['sphere_dia'] = cp.array(params['sphere_dia']) + rsteps[2]*(dia_ind-self.num_states[2]//2)
+        dparams['angles'] = cp.array(params['angles']) + ang_step*(ang_ind-dnum_rot//2)
         print('Estimated params: %.3f s' % (time.time()-stime))
 
-        for k in ['shift_x', 'shift_y', 'sphere_dia', 'angles']:
-            dparams[k] = cp.array(np.array(dparams[k]))
         return dparams
 
     def _slice_gen_holo(self, dmodel, sx, sy, dia, output=None):
@@ -223,3 +202,17 @@ class Estimator():
                  init, scales,
                  index, self.rmax, self.maxprob))
 
+    def _calc_local_prob_all(self, dmodel, params, rescale, rsteps, num_rsamples, ang_step, num_angs):
+        rvals = cp.array([params['shift_x'], params['shift_y'], params['sphere_dia']]).transpose().copy()
+        angs = cp.array(params['angles'])
+
+        #self.k_calc_local_prob_all((self.bsize_data,), (32,),
+        self.k_calc_local_prob_all((self.dset.num_data,), (1,),
+                (dmodel, self.size, rescale,
+                 self.dset.num_data, self.dset.ones, self.dset.multi,
+                 self.dset.ones_accum, self.dset.multi_accum,
+                 self.dset.place_ones, self.dset.place_multi, self.dset.count_multi,
+                 self.cx, self.cy, self.probmask, self.det.num_pix,
+                 rvals, rsteps, num_rsamples,
+                 angs, ang_step, num_angs,
+                 self.rmax, self.maxprob))
