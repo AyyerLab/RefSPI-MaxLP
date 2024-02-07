@@ -99,7 +99,7 @@ void get_logq_pattern(const complex<double> *fobj, const double rescale, const b
         s = CUDART_PI * qrad * diams[d] ;
         if (s == 0.)
             s = 1.e-8 ;
-        sphere_ft = (sin(s) - s*cos(s)) / pow(s, 3.) ;
+        sphere_ft = pow(diams[d], 3.) * (sin(s) - s*cos(s)) / pow(s, 3.) ;
         sincos(2.*CUDART_PI*(qx*shifts[d*2+0] + qy*shifts[d*2+1]), &rampi, &rampr) ;
 
         w = rescale * (pow(fobj_vr + sphere_ft*rampr, 2.) + pow(fobj_vi + sphere_ft*rampi, 2.)) ;
