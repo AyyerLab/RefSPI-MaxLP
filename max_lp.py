@@ -17,6 +17,7 @@ class MaxLPhaser():
         self._preproc_data(num_data)
         self._get_qvals()
         self.logq_v = cp.zeros((len(self.pattern), self.size, self.size))
+        self.old_ang_ind = None
 
     def _load_kernels(self):
         with open('mkernels.cu', 'r') as f:
@@ -88,6 +89,7 @@ class MaxLPhaser():
         '''
         self.sampled_mask = cp.zeros((int(np.ceil(len(ang_samples) / 64)), self.size**2), dtype='u8')
         self.ang_samples = ang_samples
+        self.old_ang_ind = None
 
         cen = self.size // 2
         for i, ang in enumerate(ang_samples):
@@ -105,6 +107,8 @@ class MaxLPhaser():
         self.diams = cp.array(params['sphere_dia'])
         self.ang = cp.array(params['angles'])
         self.ang_ind = cp.searchsorted(self.ang_samples, self.ang).astype('u8')
+        if self.old_ang_ind is None:
+            self.old_ang_ind = -1 * cp.ones_like(self.ang_ind)
         rescale = float(params['frame_rescale'])
 
         stime = time.time()
@@ -148,6 +152,10 @@ class MaxLPhaser():
             dense = cp.zeros((1, self.size**2), dtype='f8')
             frlist = []
             for d in range(self.num_data):
+                if self.ang_ind[d] == self.old_ang_ind[d]:
+                    frlist.append(self.mphotons[d])
+                    sys.stderr.write('\r%d/%d skip'%(d+1, self.num_data))
+                    continue
                 dense[:] = 0
                 ind_st = self.photons.indptr[d]
                 num_ind = (self.photons.indptr[d+1] - ind_st).item()
@@ -156,7 +164,8 @@ class MaxLPhaser():
                                              self.dx, self.dy, self.ang_samples[self.ang_ind[d]].item(),
                                              self.size, dense))
                 frlist.append(cusparse.csr_matrix(dense))
-                sys.stderr.write('\r%d/%d'%(d+1, self.num_data))
+                self.old_ang_ind[d] = self.ang_ind[d]
+                sys.stderr.write('\r%d/%d     '%(d+1, self.num_data))
             sys.stderr.write('\n')
             self.mphotons = cusparse.vstack(frlist)
 
