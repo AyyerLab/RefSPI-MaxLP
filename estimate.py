@@ -129,7 +129,7 @@ class Estimator():
         sum_detview = cp.zeros_like(detview)
 
         for d in range(self.dset.num_data):
-            self._slice_gen_holo(dmodel, params['shift_x'][d].item(), params['shift_y'][d].item(),
+            self._slice_gen_holo(dmodel, None, params['shift_x'][d].item(), params['shift_y'][d].item(),
                      params['sphere_dia'][d].item(), modelview)
             self._slice_gen(modelview, params['angles'][d], detview, do_log=False)
             sum_detview += detview
@@ -160,11 +160,6 @@ class Estimator():
         self.num_states = states_dict['num_states']
         self.maxprob[:] = -cp.finfo('f8').max
 
-        rsteps = cp.array([0.,0.,0.0363636364])
-        self.num_states = cp.array([1,1,11])
-        ang_step = 0.
-        dnum_rot = 1
-
         self._calc_local_prob_all(dmodel, params, drescale, rsteps, cp.array(self.num_states), ang_step, dnum_rot)
 
         sx_ind, sy_ind, dia_ind, ang_ind = cp.unravel_index(self.rmax, tuple(self.num_states) + (dnum_rot,))
@@ -176,12 +171,13 @@ class Estimator():
 
         return dparams
 
-    def _slice_gen_holo(self, dmodel, state_ind, output=None):
+    def _slice_gen_holo(self, dmodel, state_ind, sx=None, sy=None, dia=None, output=None):
         if output is None:
             output = cp.zeros((self.size, self.size))
-        sx = self.shiftx.ravel()[state_ind]
-        sy = self.shifty.ravel()[state_ind]
-        dia = self.sphere_dia.ravel()[state_ind]
+        if state_ind is not None:
+            sx = self.shiftx.ravel()[state_ind]
+            sy = self.shifty.ravel()[state_ind]
+            dia = self.sphere_dia.ravel()[state_ind]
 
         self.k_slice_gen_holo((self.bsize_model,)*2, (32,)*2,
                 (dmodel, sx, sy, dia, 1., 1., self.size, output))
