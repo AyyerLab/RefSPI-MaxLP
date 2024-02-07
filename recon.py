@@ -72,6 +72,9 @@ class Recon():
         dia = tuple([float(s) for s in config.get('emc', 'sphere_dia').split()])
         sx = tuple((float(s) for s in config.get('emc', 'shiftx').split()))
         sy = tuple((float(s) for s in config.get('emc', 'shifty').split()))
+        dia_w = [float(s) for s in config.get('emc', 'sphere_dia_weight', fallback='0 -1').split()]
+        sx_w = [float(s) for s in config.get('emc', 'shiftx_weight', fallback='0 -1').split()]
+        sy_w = [float(s) for s in config.get('emc', 'shifty_weight', fallback='0 -1').split()]
         self.states = {}
         self.states['shift_x'], self.states['shift_y'], self.states['sphere_dia'] = np.meshgrid(
                 np.linspace(sx[0], sx[1], int(sx[2])),
@@ -81,6 +84,18 @@ class Recon():
 
         self.states['num_states'] = np.array([sx[-1], sy[-1], dia[-1]]).astype('i8')
         print(int(self.states['num_states'].prod()), 'sampled states')
+
+        self.states['weight'] = np.ones_like(self.states['shift_x'])
+        if sx_w[1] > 0:
+            print('Incorporation Gaussian weighting for X-shift with params:', sx_w)
+            self.states['weight'] *= np.exp(-(self.states['shiftx']-sx_w[0])**2/2/sx_w[1]**2)
+        if sy_w[1] > 0:
+            print('Incorporation Gaussian weighting for Y-shift with params:', sy_w)
+            self.states['weight'] *= np.exp(-(self.states['shifty']-sy_w[0])**2/2/sy_w[1]**2)
+        if dia_w[1] > 0:
+            print('Incorporation Gaussian weighting for sphere diameter with params:', dia_w)
+            self.states['weight'] *= np.exp(-(self.states['sphere_dia']-dia_w[0])**2/2/dia_w[1]**2)
+        self.states['weight'] /= self.states['weight'].sum()
 
     def _init_model(self, config, start_dir, resume=False):
         last_iter = 0
